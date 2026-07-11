@@ -1,0 +1,41 @@
+# Copy this file to ~/.config/third-party-code-review-skill/config.toml,
+# or %USERPROFILE%\.config\third-party-code-review-skill\config.toml on Windows.
+# Keep config.toml untracked and never commit a real API key.
+
+# Use fixed tables named UPSTREAM<number> or UPSTREAM_<name>.
+# Enabled tables are evaluated in declaration order. The client sends to the
+# first two enabled upstreams concurrently and ignores later enabled tables.
+# Each upstream may use a different protocol, model, service base URL or gateway
+# mount prefix,
+# timeout, and stream mode. Context and output limits follow the upstream.
+# Do not include /v1/chat/completions, /v1/responses, or /v1/messages in
+# BASE_URL. The client appends the endpoint selected by PROTOCOL.
+# Omit STREAM to follow the upstream default. Set STREAM to true or false only
+# when the upstream accepts an explicit streaming preference.
+
+[UPSTREAM_codereview]
+ENABLED = true
+PROTOCOL = "openai_chat"
+BASE_URL = "http://172.28.100.252:10130/proxy/codereview_chat"
+MODEL = "codereview"
+API_KEY = ""
+TIMEOUT_SECONDS = 600
+MAX_RETRIES = 3
+
+[UPSTREAM2]
+ENABLED = false
+PROTOCOL = "openai_responses"
+BASE_URL = "https://api.example.test"
+MODEL = "responses-review-model"
+API_KEY = ""
+TIMEOUT_SECONDS = 600
+MAX_RETRIES = 3
+
+[UPSTREAM3]
+ENABLED = false
+PROTOCOL = "anthropic"
+BASE_URL = "https://gateway.example.test"
+MODEL = "claude-review-model"
+API_KEY = ""
+TIMEOUT_SECONDS = 600
+MAX_RETRIES = 3
