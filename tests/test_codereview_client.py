@@ -5,6 +5,7 @@ import os
 import subprocess
 import tempfile
 import threading
+import tracemalloc
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -1017,6 +1018,20 @@ class CodereviewClientTests(unittest.TestCase):
             with self.subTest(protocol=protocol):
                 with self.assertRaisesRegex(CLIENT.ClientError, expected):
                     CLIENT.parse_stream_response(stream, protocol)
+
+    def test_parse_stream_response_does_not_retain_all_delta_events(self):
+        event = 'data: {"choices":[{"delta":{"content":"0123456789abcdef0123456789abcdef"}}]}\n\n'
+        text = event * 60000
+
+        tracemalloc.start()
+        try:
+            result = CLIENT.parse_stream_response(text, "openai_chat")
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+        self.assertEqual(len(result), 32 * 60000)
+        self.assertLess(peak, 25_000_000)
 
     def test_redact_url_for_output_removes_sensitive_components(self):
         redacted = CLIENT.redact_url_for_output(

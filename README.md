@@ -101,7 +101,7 @@ BASE_URL = "https://gateway.example/direct-review"
 
 For example, `openai_chat` resolves that value to `https://gateway.example/direct-review/v1/chat/completions`. Do not configure the resolved endpoint as `BASE_URL`, or the path would be appended twice.
 
-OpenAI Responses requests set `store: false`. Omit `STREAM` to omit the request field and follow the upstream default. `STREAM = true` requests SSE, while `STREAM = false` requests one JSON response. Each mode uses one stateless HTTP request.
+OpenAI Responses requests set `store: false`. Streaming is enabled by default. `STREAM = false` requests one JSON response instead. Each mode uses one stateless HTTP request.
 
 ### OpenAI Chat Completions
 
@@ -268,7 +268,7 @@ python scripts/codereview_client.py --question "Review this change" --stream
 python scripts/codereview_client.py --question "Review this change" --no-stream
 ```
 
-With neither flag and no `STREAM` setting, the request omits the field and the upstream chooses its default. The client parses either JSON or SSE based on the actual response.
+With neither flag and no `STREAM` setting, the request uses streaming. The client parses either JSON or SSE based on the actual response.
 
 ## Security Model
 

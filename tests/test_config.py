@@ -27,7 +27,7 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(hasattr(config, "max_input_chars"))
         self.assertEqual(config.timeout_seconds, 600)
         self.assertEqual(config.max_retries, 3)
-        self.assertIsNone(config.stream)
+        self.assertTrue(config.stream)
 
     def test_max_retries_accepts_zero_to_ten(self):
         self.assertEqual(CLIENT.Config({"max_retries": 0}).max_retries, 0)
@@ -51,7 +51,8 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(CLIENT.Config(values).max_retries, 6)
 
-    def test_stream_is_optional_and_accepts_boolean_values(self):
+    def test_stream_defaults_to_true_and_accepts_boolean_values(self):
+        self.assertTrue(CLIENT.Config({}).stream)
         self.assertTrue(CLIENT.Config({"stream": True}).stream)
         self.assertFalse(CLIENT.Config({"stream": False}).stream)
         self.assertTrue(CLIENT.Config({"stream": "true"}).stream)

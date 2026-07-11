@@ -35,6 +35,7 @@ MODEL = "codereview"
 API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
+STREAM = true
 
 [UPSTREAM2]
 ENABLED = true
@@ -44,6 +45,7 @@ MODEL = "responses-review-model"
 API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
+STREAM = true
 
 [UPSTREAM3]
 ENABLED = false
@@ -53,6 +55,7 @@ MODEL = "claude-review-model"
 API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
+STREAM = true
 ```
 
 Every enabled table must explicitly contain `PROTOCOL`, `BASE_URL`, `MODEL`, and `API_KEY`. Disabled tables may remain incomplete, but their key names and `ENABLED` type are still validated. Top-level scalar settings cannot be mixed with upstream tables.
@@ -68,7 +71,7 @@ Every enabled table must explicitly contain `PROTOCOL`, `BASE_URL`, `MODEL`, and
 | `API_KEY` | Required before a request; kept out of request bodies and normal output. |
 | `TIMEOUT_SECONDS` | `600`; positive per-upstream total response deadline. Concurrent requests make total wait approximate the slowest selected upstream rather than the sum. |
 | `MAX_RETRIES` | `3`; integer from `0` through `10`. This is the number of retries after the initial request, so the default permits up to four attempts per upstream. Each upstream counts independently. |
-| `STREAM` | Optional boolean. Omit it to omit the request field and follow the upstream default; `true` requests SSE and `false` requests JSON. |
+| `STREAM` | `true`; requests SSE by default. Set `false` for one JSON response. |
 
 `BASE_URL` may include a gateway mount prefix such as `/proxy/codereview_chat`, but it must not include the protocol endpoint path. The client removes a trailing slash from the configured path and appends `/v1/chat/completions` for `openai_chat`, `/v1/responses` for `openai_responses`, or `/v1/messages` for `anthropic`. A configured query is preserved on the resolved request URL. Existing values that already contain an endpoint are not detected or trimmed automatically and would produce a duplicated path.
 
@@ -102,7 +105,7 @@ Run `python scripts/codereview_client.py doctor` to inspect the effective config
 | `openai_responses` | `model`, `instructions`, `input`, `store: false`, optional `stream` | JSON output text or Responses SSE deltas | `Authorization: Bearer ...` |
 | `anthropic` | Anthropic-compatible Messages: `model`, top-level `system`, `messages`, optional `stream` | JSON text blocks or Anthropic SSE text deltas | `x-api-key` and a client-defined `anthropic-version` header |
 
-When `STREAM` is omitted, the request omits `stream` and follows the upstream default. The client parses SSE when the actual response is `text/event-stream`; otherwise it parses one JSON response.
+When `STREAM` is omitted, the client sends `stream: true`. Set `STREAM = false` or use `--no-stream` for one JSON response. The client still parses the actual response as SSE or JSON without a second request.
 
 Each upstream may make up to `1 + MAX_RETRIES` stateless attempts. Retryable failures are transport errors, timeouts, HTTP 408/429/5xx, invalid UTF-8, invalid JSON/SSE, and responses with no usable text. Redirects, other 4xx responses, configuration errors, and local input errors fail immediately. Retry waits are 1, 2, and 4 seconds, then remain capped at 8 seconds. With two upstreams at the default, the maximum is eight external attempts in total, but the counters and completion timing remain independent.
 

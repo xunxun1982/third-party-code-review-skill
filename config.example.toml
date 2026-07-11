@@ -10,8 +10,8 @@
 # timeout, and stream mode. Context and output limits follow the upstream.
 # Do not include /v1/chat/completions, /v1/responses, or /v1/messages in
 # BASE_URL. The client appends the endpoint selected by PROTOCOL.
-# Omit STREAM to follow the upstream default. Set STREAM to true or false only
-# when the upstream accepts an explicit streaming preference.
+# Enable streaming by default. Set STREAM to false only when the upstream
+# requires one JSON response.
 
 # Plain HTTP is supported only for explicitly trusted internal relays. Keep
 # this example disabled until you explicitly accept the cleartext credential risk.
@@ -23,6 +23,7 @@ MODEL = "codereview"
 API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
+STREAM = true
 
 [UPSTREAM2]
 ENABLED = false
@@ -32,6 +33,7 @@ MODEL = "responses-review-model"
 API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
+STREAM = true
 
 [UPSTREAM3]
 ENABLED = false
@@ -41,3 +43,4 @@ MODEL = "claude-review-model"
 API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
+STREAM = true

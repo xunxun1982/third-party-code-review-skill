@@ -35,6 +35,7 @@ DEFAULT_BASE_URL = "http://172.28.100.252:10130/proxy/codereview_chat"
 DEFAULT_PROTOCOL = "openai_chat"
 DEFAULT_MODEL = "codereview"
 DEFAULT_TIMEOUT_SECONDS = 600
+DEFAULT_STREAM = True
 DEFAULT_MAX_RETRIES = 3
 ANTHROPIC_API_VERSION = "2023-06-01"
 USER_AGENT = "third-party-code-review-skill/1.0"
@@ -316,7 +317,7 @@ def _bounded_retry_count(values: dict[str, Any]) -> int:
 
 
 def _stream_mode(values: dict[str, Any]) -> bool | None:
-    raw = values.get("stream")
+    raw = values.get("stream", DEFAULT_STREAM)
     if raw is None:
         return None
     if isinstance(raw, bool):
@@ -921,8 +922,6 @@ def parse_stream_response(text: str, protocol: str) -> str:
             safe_type = strip_control_characters(error_type)
             safe_message = strip_control_characters(safe_message)
             raise ClientError(f"Streaming API error {safe_type}: {safe_message}")
-        fallback_objects.append(event)
-
         if protocol == "openai_chat":
             try:
                 delta = event["choices"][0]["delta"]["content"]
@@ -942,6 +941,11 @@ def parse_stream_response(text: str, protocol: str) -> str:
                     deltas.append(value)
         else:
             raise ConfigError(f"Unsupported protocol: {protocol}")
+
+        if deltas:
+            fallback_objects.clear()
+        else:
+            fallback_objects.append(event)
 
     if deltas:
         return "".join(deltas)

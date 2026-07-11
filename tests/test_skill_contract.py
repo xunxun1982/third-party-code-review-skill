@@ -37,7 +37,7 @@ class SkillContractTests(unittest.TestCase):
         text = SKILL_MD.read_text(encoding="utf-8")
 
         self.assertNotIn("TODO", text)
-        self.assertRegex(text, r"(?m)^name: third-party-code-review$")
+        self.assertRegex(text, r"(?m)^name: third-party-code-review-skill$")
         description = re.search(r"(?m)^description: (.+)$", text)
         self.assertIsNotNone(description)
         self.assertTrue(description.group(1).startswith("Use when "))
@@ -101,8 +101,8 @@ class SkillContractTests(unittest.TestCase):
         text = OPENAI_YAML.read_text(encoding="utf-8")
 
         self.assertNotIn("�", text)
-        self.assertIn('display_name: "Third-party Code Review"', text)
-        self.assertIn("$third-party-code-review", text)
+        self.assertIn('display_name: "third-party-code-review-skill"', text)
+        self.assertIn("$third-party-code-review-skill", text)
 
     def test_config_example_is_valid_and_contains_no_real_key(self):
         text = CONFIG_EXAMPLE.read_text(encoding="utf-8")
@@ -125,6 +125,7 @@ class SkillContractTests(unittest.TestCase):
             self.assertEqual(upstream["API_KEY"], "")
             self.assertEqual(upstream["TIMEOUT_SECONDS"], 600)
             self.assertEqual(upstream["MAX_RETRIES"], 3)
+            self.assertTrue(upstream["STREAM"])
         self.assertNotIn("API_URL", text)
         self.assertNotIn("API_BASE", text)
         self.assertNotIn("API_PATH", text)
@@ -140,7 +141,7 @@ class SkillContractTests(unittest.TestCase):
         for label in ["[UPSTREAM_codereview]", "[UPSTREAM2]", "[UPSTREAM3]"]:
             self.assertIn(label, text)
         self.assertNotIn('STREAM = "auto"', text)
-        self.assertIn("follow the upstream default", text)
+        self.assertIn("Enable streaming by default", text)
         self.assertIn(
             'BASE_URL = "http://172.28.100.252:10130/proxy/codereview_chat"',
             text,
