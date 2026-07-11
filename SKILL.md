@@ -38,7 +38,7 @@ Read [references/configuration.md](references/configuration.md) before configuri
 | Scope | Command | Completion gate |
 |---|---|---|
 | Selected files | `python scripts/codereview_client.py --question "Review correctness, security, and regression risk" --cwd "<repo>" --file "src/app.py"` | Every file was approved and every selected upstream returned review text or a redacted error. |
-| Tracked diff | `python scripts/codereview_client.py --question "Review the current changes" --git-diff --cwd "<repo>"` | The `HEAD` diff contains no blocked path and every selected upstream completed or returned a redacted error. |
+| Tracked diff | `python scripts/codereview_client.py --question "Review the current changes" --git-diff --cwd "<repo>"` | The tracked `HEAD` diff, or staged diff before the first commit, contains no blocked path and every selected upstream completed or returned a redacted error. |
 | Question only | `python scripts/codereview_client.py --question "<question>"` | No local file or diff content was sent. |
 | Configuration diagnosis | `python scripts/codereview_client.py doctor` | Redacted effective configuration was reported; this command does not perform a network request. |
 
@@ -46,7 +46,7 @@ Use `python scripts/codereview_client.py --help` for one-call overrides.
 
 ## Operating Rules
 
-- Send selected files, the tracked diff relative to `HEAD`, or a standalone question. Proactive code disclosure requires user approval.
+- Send selected files, the tracked diff relative to `HEAD` (or staged files before the first commit), or a standalone question. Non-Git directories must use explicit `--file` selections. Proactive code disclosure requires user approval.
 - Confirm that each selected upstream has a configured key without reading or echoing it. Never use a key pasted into the conversation.
 - Make up to `1 + MAX_RETRIES` external requests per selected upstream. Retry only transient transport, timeout, HTTP 408/429/5xx, and invalid or empty response failures; reduce over-limit scope instead of truncating or chunking.
 - Omit `STREAM` to follow each upstream default, or use `STREAM = true` / `STREAM = false` and the matching CLI flags when an explicit mode is required. Parse the actual JSON or SSE response without a second request.

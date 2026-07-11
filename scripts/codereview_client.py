@@ -649,6 +649,7 @@ def _read_git_changed_paths(
     cwd: Path,
     runner: Callable[..., subprocess.CompletedProcess[str]],
     max_chars: int,
+    comparison: list[str],
 ) -> list[str]:
     path_command = [
         "git",
@@ -658,7 +659,7 @@ def _read_git_changed_paths(
         "--no-renames",
         "--no-ext-diff",
         "--no-textconv",
-        "HEAD",
+        *comparison,
         "--",
         ".",
     ]
@@ -675,6 +676,38 @@ def _read_git_changed_paths(
     return [raw for raw in path_result.stdout.split("\0") if raw]
 
 
+def _git_diff_comparison(
+    cwd: Path,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+    max_chars: int,
+) -> tuple[list[str], list[str]]:
+    try:
+        return ["HEAD"], _read_git_changed_paths(cwd, runner, max_chars, ["HEAD"])
+    except ClientError as head_error:
+        head = _run_git_command(
+            cwd,
+            ["git", "rev-parse", "--verify", "HEAD"],
+            128,
+            runner,
+        )
+        if head.returncode == 0:
+            raise head_error
+        work_tree = _run_git_command(
+            cwd,
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            32,
+            runner,
+        )
+        if work_tree.returncode != 0 or work_tree.stdout.strip() != "true":
+            raise ClientError(
+                "--git-diff requires a Git work tree; use --file for selected files"
+            ) from head_error
+        comparison = ["--cached"]
+        return comparison, _read_git_changed_paths(
+            cwd, runner, max_chars, comparison
+        )
+
+
 def _reject_forbidden_git_paths(paths: Iterable[str]) -> None:
     for raw_path in paths:
         if _is_forbidden(Path(raw_path)):
@@ -686,7 +719,7 @@ def read_git_diff(
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     max_chars: int = LOCAL_INPUT_SAFETY_CHARS,
 ) -> tuple[str, str, int]:
-    changed_paths = _read_git_changed_paths(cwd, runner, max_chars)
+    comparison, changed_paths = _git_diff_comparison(cwd, runner, max_chars)
     if not changed_paths:
         raise ClientError("No tracked Git diff is available for review")
     _reject_forbidden_git_paths(changed_paths)
@@ -698,7 +731,7 @@ def read_git_diff(
         "--no-ext-diff",
         "--no-textconv",
         "--unified=80",
-        "HEAD",
+        *comparison,
         "--",
         ".",
     ]
@@ -718,7 +751,7 @@ def read_git_diff(
         raise ClientError(
             f"Input exceeds the {max_chars}-character limit; reduce the file or diff scope"
         )
-    verified_paths = _read_git_changed_paths(cwd, runner, max_chars)
+    verified_paths = _read_git_changed_paths(cwd, runner, max_chars, comparison)
     _reject_forbidden_git_paths(verified_paths)
     if set(verified_paths) != set(changed_paths):
         raise ClientError("Tracked Git paths changed during capture; retry the review")
@@ -1186,7 +1219,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("command", nargs="?", choices=["doctor"])
     parser.add_argument("--question", help="Question for the review model")
     parser.add_argument("--file", action="append", default=[], help="UTF-8 text file; repeatable")
-    parser.add_argument("--git-diff", action="store_true", help="Send the tracked diff relative to HEAD")
+    parser.add_argument(
+        "--git-diff",
+        action="store_true",
+        help="Send tracked changes relative to HEAD, or staged changes before the first commit",
+    )
     parser.add_argument("--cwd", default=".", help="Working directory for relative files and Git diff")
     parser.add_argument(
         "--base-url",

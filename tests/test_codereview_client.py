@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -386,6 +387,25 @@ class CodereviewClientTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(CLIENT.ClientError, "exceeds"):
             CLIENT.read_git_diff(Path("."), runner=runner, max_chars=10)
+
+    def test_read_git_diff_supports_staged_files_before_first_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "app.py").write_text("print('first commit')\n", encoding="utf-8")
+            subprocess.run(["git", "add", "app.py"], cwd=root, check=True)
+
+            label, content, redactions = CLIENT.read_git_diff(root)
+
+        self.assertEqual(label, "git-diff")
+        self.assertIn("app.py", content)
+        self.assertIn("first commit", content)
+        self.assertEqual(redactions, 0)
+
+    def test_read_git_diff_reports_non_git_directory_clearly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(CLIENT.ClientError, "Git work tree"):
+                CLIENT.read_git_diff(Path(tmp))
 
     def test_request_review_uses_protocol_specific_authentication(self):
         server = HTTPServer(("127.0.0.1", 0), ReviewHandler)

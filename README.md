@@ -227,7 +227,9 @@ python scripts/codereview_client.py `
   --file "tests/test_app.py"
 ```
 
-Review the current tracked diff relative to `HEAD`:
+Review the current tracked diff relative to `HEAD`. Before the first commit,
+this reviews staged files instead; run `git add` first. For a directory that is
+not a Git work tree, select files explicitly with `--file`:
 
 ```bash
 python scripts/codereview_client.py \
@@ -350,7 +352,7 @@ The tests cover:
 ## Limitations
 
 - The client sends text only; it does not upload images, PDFs, archives, or binary artifacts.
-- `--git-diff` includes tracked staged and unstaged changes relative to `HEAD`; it does not include untracked files.
+- With `HEAD`, `--git-diff` includes tracked staged and unstaged changes relative to it. Before the first commit, it includes staged files only. It never includes untracked files automatically.
 - The client does not calculate model tokens or send context-window or output-length settings. An internal bounded-capture guard protects local resources, while the upstream governs model limits.
 - The client does not split or truncate. It retries only the documented transient failures, merges at most two independently returned reviews after both tasks finish, and buffers SSE up to the response-size limit before each review is combined.
 - Secret redaction is pattern-based and cannot replace human scope review.
