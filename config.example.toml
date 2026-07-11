@@ -13,8 +13,10 @@
 # Omit STREAM to follow the upstream default. Set STREAM to true or false only
 # when the upstream accepts an explicit streaming preference.
 
+# Plain HTTP is supported only for explicitly trusted internal relays. Keep
+# this example disabled until you explicitly accept the cleartext credential risk.
 [UPSTREAM_codereview]
-ENABLED = true
+ENABLED = false
 PROTOCOL = "openai_chat"
 BASE_URL = "http://172.28.100.252:10130/proxy/codereview_chat"
 MODEL = "codereview"

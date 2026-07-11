@@ -114,9 +114,7 @@ class SkillContractTests(unittest.TestCase):
             if key.lower().startswith("upstream")
         ]
         self.assertEqual(len(upstreams), 3)
-        self.assertTrue(upstreams[0]["ENABLED"])
-        self.assertFalse(upstreams[1]["ENABLED"])
-        self.assertFalse(upstreams[2]["ENABLED"])
+        self.assertTrue(all(not upstream["ENABLED"] for upstream in upstreams))
         self.assertEqual(upstreams[0]["PROTOCOL"], "openai_chat")
         self.assertEqual(
             upstreams[0]["BASE_URL"],
@@ -147,6 +145,7 @@ class SkillContractTests(unittest.TestCase):
             'BASE_URL = "http://172.28.100.252:10130/proxy/codereview_chat"',
             text,
         )
+        self.assertIn("explicitly accept the cleartext credential risk", text)
         self.assertIn('BASE_URL = "https://api.example.test"', text)
         self.assertIn(
             'BASE_URL = "https://gateway.example.test"', text

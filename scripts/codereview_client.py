@@ -29,6 +29,8 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 only
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 APP_DIR_NAME = "third-party-code-review-skill"
 
+# The product default targets a trusted internal relay; main warns before any
+# plain-HTTP request, while the copy-and-use template keeps it disabled.
 DEFAULT_BASE_URL = "http://172.28.100.252:10130/proxy/codereview_chat"
 DEFAULT_PROTOCOL = "openai_chat"
 DEFAULT_MODEL = "codereview"
