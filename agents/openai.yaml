@@ -1,0 +1,4 @@
+interface:
+  display_name: "Third-party Code Review"
+  short_description: "Send selected code to an external review model"
+  default_prompt: "Use $third-party-code-review to independently review the code scope I specify."
