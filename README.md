@@ -93,6 +93,19 @@ Set each upstream table's `PROTOCOL` to exactly one of these values:
 
 `BASE_URL` is the service root URL or a gateway mount prefix. It may include a path such as `/proxy/codereview_chat`, but it must not include the protocol endpoint path. The client appends `/v1/chat/completions`, `/v1/responses`, or `/v1/messages` according to `PROTOCOL`. A configured query is preserved on the final request URL.
 
+The client also preserves visible upstream reasoning or summary data when the selected protocol returns it. It does not add a reasoning request parameter. When reasoning is present, the output is:
+
+```text
+{Upstream reasoning or summary (<protocol>):
+<reasoning or summary text>
+}
+
+Review result:
+<review text>
+```
+
+Without reasoning, the existing plain review text is returned. Reasoning-only output is successful and uses `Review result: [No review text returned]` so upstream withdrawals or omitted final answers remain visible.
+
 For a gateway that exposes the complete route as its base, use:
 
 ```toml

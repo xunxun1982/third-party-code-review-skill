@@ -842,23 +842,107 @@ def build_payload(
     )
 
 
-def parse_response(response: object, protocol: str = DEFAULT_PROTOCOL) -> str:
+def _extract_tagged_reasoning(text: str) -> tuple[str, list[str]]:
+    stripped = text.strip()
+    for tag in ("think", "thinking"):
+        opening = f"<{tag}>"
+        if stripped[: len(opening)].lower() != opening:
+            continue
+        closing = f"</{tag}>"
+        closing_match = re.search(
+            re.escape(closing),
+            stripped[len(opening) :],
+            flags=re.IGNORECASE | re.ASCII,
+        )
+        if closing_match is None:
+            break
+        closing_index = len(opening) + closing_match.start()
+        reasoning = stripped[len(opening) : closing_index].strip()
+        review = stripped[closing_index + len(closing) :].strip()
+        if reasoning:
+            return review, [reasoning]
+        break
+    return stripped, []
+
+
+def _format_review_response(
+    protocol: str,
+    text_parts: list[str],
+    reasoning_parts: list[str],
+) -> str:
+    reviews: list[str] = []
+    for part in text_parts:
+        review, tagged_reasoning = _extract_tagged_reasoning(part)
+        reasoning_parts.extend(tagged_reasoning)
+        if review:
+            reviews.append(review)
+
+    reasoning_text = "\n".join(part.strip() for part in reasoning_parts if part.strip())
+    if not reviews and not reasoning_text:
+        raise ClientError("API response contains no usable text")
+
+    review_text = "\n".join(reviews) if reviews else "[No review text returned]"
+    if not reasoning_text:
+        return review_text
+    return (
+        f"{{Upstream reasoning or summary ({protocol}):\n{reasoning_text}\n}}"
+        f"\n\nReview result:\n{review_text}"
+    )
+
+
+def _append_reasoning_value(
+    parts: list[str], value: object, *, preserve_whitespace: bool = False
+) -> None:
+    if isinstance(value, str):
+        if preserve_whitespace:
+            if value:
+                parts.append(value)
+        elif value.strip():
+            parts.append(value.strip())
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if not isinstance(text, str):
+                    continue
+                if preserve_whitespace:
+                    if text:
+                        parts.append(text)
+                elif text.strip():
+                    parts.append(text.strip())
+
+
+def _parse_response_parts(
+    response: object, protocol: str
+) -> tuple[list[str], list[str]]:
     text_parts: list[str] = []
+    reasoning_parts: list[str] = []
     if not isinstance(response, dict):
         raise ClientError("API response contains no usable text")
 
     if protocol == "openai_chat":
         try:
-            content = response["choices"][0]["message"]["content"]
+            message = response["choices"][0]["message"]
         except (KeyError, IndexError, TypeError):
-            content = ""
+            message = {}
+        if not isinstance(message, dict):
+            message = {}
+        for field in ("reasoning", "reasoning_content", "thinking"):
+            _append_reasoning_value(reasoning_parts, message.get(field))
+        content = message.get("content")
         if isinstance(content, str) and content.strip():
             text_parts.append(content.strip())
     elif protocol == "openai_responses":
         output = response.get("output", [])
         if isinstance(output, list):
             for item in output:
-                if not isinstance(item, dict) or item.get("type") != "message":
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "reasoning":
+                    _append_reasoning_value(reasoning_parts, item.get("summary"))
+                    _append_reasoning_value(reasoning_parts, item.get("content"))
+                    continue
+                if item.get("type") != "message":
                     continue
                 content = item.get("content", [])
                 if not isinstance(content, list):
@@ -879,6 +963,9 @@ def parse_response(response: object, protocol: str = DEFAULT_PROTOCOL) -> str:
         content = response.get("content", [])
         if isinstance(content, list):
             for block in content:
+                if isinstance(block, dict) and block.get("type") == "thinking":
+                    _append_reasoning_value(reasoning_parts, block.get("thinking"))
+                    continue
                 if (
                     isinstance(block, dict)
                     and block.get("type") == "text"
@@ -889,13 +976,17 @@ def parse_response(response: object, protocol: str = DEFAULT_PROTOCOL) -> str:
     else:
         raise ConfigError(f"Unsupported protocol: {protocol}")
 
-    if not text_parts:
-        raise ClientError("API response contains no usable text")
-    return "\n".join(text_parts)
+    return text_parts, reasoning_parts
+
+
+def parse_response(response: object, protocol: str = DEFAULT_PROTOCOL) -> str:
+    text_parts, reasoning_parts = _parse_response_parts(response, protocol)
+    return _format_review_response(protocol, text_parts, reasoning_parts)
 
 
 def parse_stream_response(text: str, protocol: str) -> str:
     deltas: list[str] = []
+    reasoning_deltas: list[str] = []
     fallback_objects: list[dict[str, Any]] = []
 
     for line in text.splitlines():
@@ -924,31 +1015,72 @@ def parse_stream_response(text: str, protocol: str) -> str:
             raise ClientError(f"Streaming API error {safe_type}: {safe_message}")
         if protocol == "openai_chat":
             try:
-                delta = event["choices"][0]["delta"]["content"]
+                delta_object = event["choices"][0]["delta"]
             except (KeyError, IndexError, TypeError):
-                delta = ""
+                delta_object = {}
+            if not isinstance(delta_object, dict):
+                delta_object = {}
+            for field in ("reasoning", "reasoning_content", "thinking"):
+                _append_reasoning_value(
+                    reasoning_deltas,
+                    delta_object.get(field),
+                    preserve_whitespace=True,
+                )
+            delta = delta_object.get("content")
             if isinstance(delta, str) and delta:
                 deltas.append(delta)
         elif protocol == "openai_responses":
             delta = event.get("delta")
             if event.get("type") == "response.output_text.delta" and isinstance(delta, str):
                 deltas.append(delta)
+            elif event.get("type") in {
+                "response.reasoning_summary_text.delta",
+                "response.reasoning_text.delta",
+                "response.reasoning.delta",
+            }:
+                _append_reasoning_value(
+                    reasoning_deltas, delta, preserve_whitespace=True
+                )
         elif protocol == "anthropic":
             delta = event.get("delta")
             if isinstance(delta, dict) and delta.get("type") == "text_delta":
                 value = delta.get("text")
                 if isinstance(value, str) and value:
                     deltas.append(value)
+            elif isinstance(delta, dict) and delta.get("type") == "thinking_delta":
+                _append_reasoning_value(
+                    reasoning_deltas,
+                    delta.get("thinking"),
+                    preserve_whitespace=True,
+                )
         else:
             raise ConfigError(f"Unsupported protocol: {protocol}")
 
         if deltas:
             fallback_objects.clear()
+        elif reasoning_deltas:
+            candidates = [event]
+            nested_response = event.get("response")
+            if isinstance(nested_response, dict):
+                candidates.insert(0, nested_response)
+            for candidate in candidates:
+                try:
+                    text_parts, candidate_reasoning = _parse_response_parts(
+                        candidate, protocol
+                    )
+                except ClientError:
+                    continue
+                if not text_parts and not candidate_reasoning:
+                    continue
+                fallback_objects[:] = [event]
+                break
         else:
             fallback_objects.append(event)
 
     if deltas:
-        return "".join(deltas)
+        return _format_review_response(
+            protocol, ["".join(deltas)], ["".join(reasoning_deltas)]
+        )
 
     for event in reversed(fallback_objects):
         candidates = [event]
@@ -957,9 +1089,20 @@ def parse_stream_response(text: str, protocol: str) -> str:
             candidates.insert(0, nested_response)
         for candidate in candidates:
             try:
-                return parse_response(candidate, protocol)
+                text_parts, final_reasoning = _parse_response_parts(
+                    candidate, protocol
+                )
+                return _format_review_response(
+                    protocol,
+                    text_parts,
+                    final_reasoning or ["".join(reasoning_deltas)],
+                )
             except ClientError:
                 continue
+    if reasoning_deltas:
+        return _format_review_response(
+            protocol, [], ["".join(reasoning_deltas)]
+        )
     raise ClientError("Streaming API response contains no usable text")
 
 

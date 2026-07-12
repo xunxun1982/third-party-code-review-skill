@@ -57,6 +57,9 @@ class SkillContractTests(unittest.TestCase):
             "must not include the protocol endpoint path",
             "third-party-code-review-skill/1.0",
             "THIRD_PARTY_CODEREVIEW_MAX_RETRIES",
+            "visible upstream reasoning or summary",
+            "Review result",
+            "No review text returned",
         ]:
             self.assertIn(phrase, text)
 
@@ -94,6 +97,9 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("independently", text)
         self.assertIn("four attempts", text)
         self.assertIn("unsupported by the active console encoding", text)
+        self.assertIn("visible upstream reasoning or summary", text)
+        self.assertIn("Review result", text)
+        self.assertIn("No review text returned", text)
         for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"]:
             self.assertIn(path, text)
 
@@ -188,6 +194,10 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("independent retry counter", text)
         self.assertIn("up to four attempts", text)
         self.assertIn("unsupported by the active console encoding", text)
+        self.assertIn("reasoning_content", text)
+        self.assertIn("thinking_delta", text)
+        self.assertIn("Review result", text)
+        self.assertIn("No review text returned", text)
 
     def test_local_process_files_are_git_ignored(self):
         lines = GITIGNORE.read_text(encoding="utf-8").splitlines()

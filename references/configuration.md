@@ -107,6 +107,10 @@ Run `python scripts/codereview_client.py doctor` to inspect the effective config
 
 When `STREAM` is omitted, the client sends `stream: true`. Set `STREAM = false` or use `--no-stream` for one JSON response. The client still parses the actual response as SSE or JSON without a second request.
 
+Visible reasoning is parsed without adding request parameters. `openai_chat` accepts `reasoning`, `reasoning_content`, or `thinking` message and delta fields; `openai_responses` accepts reasoning summary items and reasoning summary/text delta events; `anthropic` accepts `thinking` blocks and `thinking_delta`. A single complete leading `<think>` or `<thinking>` wrapper is separated as reasoning even when no review text follows it; literal tags elsewhere remain review text. Signatures and encrypted thinking metadata are ignored.
+
+When reasoning exists, output places `{Upstream reasoning or summary (<protocol>): ...}` before `Review result`. Without reasoning, output remains the plain review text. Reasoning-only output is valid and marks the body `[No review text returned]`; only a response containing neither reasoning nor review text is empty and retryable.
+
 Each upstream may make up to `1 + MAX_RETRIES` stateless attempts. Retryable failures are transport errors, timeouts, HTTP 408/429/5xx, invalid UTF-8, invalid JSON/SSE, and responses with no usable text. Redirects, other 4xx responses, configuration errors, and local input errors fail immediately. Retry waits are 1, 2, and 4 seconds, then remain capped at 8 seconds. With two upstreams at the default, the maximum is eight external attempts in total, but the counters and completion timing remain independent.
 
 Every request sends `User-Agent: third-party-code-review-skill/1.0`. This identifies the client without impersonating a browser.
