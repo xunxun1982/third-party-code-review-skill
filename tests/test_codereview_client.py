@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -389,6 +390,7 @@ class CodereviewClientTests(unittest.TestCase):
         with self.assertRaisesRegex(CLIENT.ClientError, "exceeds"):
             CLIENT.read_git_diff(Path("."), runner=runner, max_chars=10)
 
+    @unittest.skipUnless(shutil.which("git"), "git not installed")
     def test_read_git_diff_supports_staged_files_before_first_commit(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -403,6 +405,7 @@ class CodereviewClientTests(unittest.TestCase):
         self.assertIn("first commit", content)
         self.assertEqual(redactions, 0)
 
+    @unittest.skipUnless(shutil.which("git"), "git not installed")
     def test_read_git_diff_reports_non_git_directory_clearly(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(CLIENT.ClientError, "Git work tree"):
