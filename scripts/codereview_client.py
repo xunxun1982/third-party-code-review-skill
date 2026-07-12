@@ -987,6 +987,7 @@ def parse_response(response: object, protocol: str = DEFAULT_PROTOCOL) -> str:
 def parse_stream_response(text: str, protocol: str) -> str:
     deltas: list[str] = []
     reasoning_deltas: list[str] = []
+    completed_reasoning: list[str] = []
     fallback_objects: list[dict[str, Any]] = []
 
     for line in text.splitlines():
@@ -1056,6 +1057,22 @@ def parse_stream_response(text: str, protocol: str) -> str:
         else:
             raise ConfigError(f"Unsupported protocol: {protocol}")
 
+        nested_response = event.get("response")
+        if (
+            protocol == "openai_responses"
+            and event.get("type") == "response.completed"
+            and isinstance(nested_response, dict)
+        ):
+            try:
+                _, terminal_reasoning = _parse_response_parts(
+                    nested_response, protocol
+                )
+            except ClientError:
+                pass
+            else:
+                if terminal_reasoning:
+                    completed_reasoning = terminal_reasoning
+
         if deltas:
             fallback_objects.clear()
         elif reasoning_deltas:
@@ -1079,7 +1096,9 @@ def parse_stream_response(text: str, protocol: str) -> str:
 
     if deltas:
         return _format_review_response(
-            protocol, ["".join(deltas)], ["".join(reasoning_deltas)]
+            protocol,
+            ["".join(deltas)],
+            completed_reasoning or ["".join(reasoning_deltas)],
         )
 
     for event in reversed(fallback_objects):

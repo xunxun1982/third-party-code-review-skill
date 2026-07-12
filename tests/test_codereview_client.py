@@ -1243,6 +1243,39 @@ class CodereviewClientTests(unittest.TestCase):
         self.assertEqual(result.count("summary"), 2)
         self.assertIn("Review result:\nreview", result)
 
+    def test_completed_reasoning_is_merged_with_streamed_review_text(self):
+        stream = (
+            'data: {"type":"response.output_text.delta","delta":"streamed review"}\n\n'
+            'data: {"type":"response.completed","response":{"output":['
+            '{"type":"reasoning","summary":[{"type":"summary_text","text":"final summary"}]},'
+            '{"type":"message","content":[{"type":"output_text","text":"final review"}]}'
+            ']}}\n\n'
+        )
+
+        result = CLIENT.parse_stream_response(stream, "openai_responses")
+
+        self.assertIn("\nfinal summary\n}", result)
+        self.assertIn("Review result:\nstreamed review", result)
+        self.assertNotIn("final review", result)
+
+    def test_in_progress_reasoning_cannot_override_streamed_reasoning(self):
+        stream = (
+            'data: {"type":"response.reasoning_summary_text.delta","delta":"stream-complete"}\n\n'
+            'data: {"type":"response.output_text.delta","delta":"streamed review"}\n\n'
+            'data: {"type":"response.in_progress","response":{"output":['
+            '{"type":"reasoning","summary":[{"type":"summary_text","text":"partial-snapshot"}]}'
+            ']}}\n\n'
+            'data: {"type":"response.completed","response":{"output":['
+            '{"type":"message","content":[{"type":"output_text","text":"final review"}]}'
+            ']}}\n\n'
+        )
+
+        result = CLIENT.parse_stream_response(stream, "openai_responses")
+
+        self.assertIn("\nstream-complete\n}", result)
+        self.assertNotIn("partial-snapshot", result)
+        self.assertIn("Review result:\nstreamed review", result)
+
     def test_completed_review_prefix_cannot_hide_streamed_reasoning(self):
         review = "{Upstream reasoning or summary (literal review text)"
         stream = (
