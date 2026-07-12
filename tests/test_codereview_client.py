@@ -2,8 +2,11 @@ import importlib.util
 import io
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 import threading
+import tracemalloc
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -386,6 +389,27 @@ class CodereviewClientTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(CLIENT.ClientError, "exceeds"):
             CLIENT.read_git_diff(Path("."), runner=runner, max_chars=10)
+
+    @unittest.skipUnless(shutil.which("git"), "git not installed")
+    def test_read_git_diff_supports_staged_files_before_first_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "app.py").write_text("print('first commit')\n", encoding="utf-8")
+            subprocess.run(["git", "add", "app.py"], cwd=root, check=True)
+
+            label, content, redactions = CLIENT.read_git_diff(root)
+
+        self.assertEqual(label, "git-diff")
+        self.assertIn("app.py", content)
+        self.assertIn("first commit", content)
+        self.assertEqual(redactions, 0)
+
+    @unittest.skipUnless(shutil.which("git"), "git not installed")
+    def test_read_git_diff_reports_non_git_directory_clearly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(CLIENT.ClientError, "Git work tree"):
+                CLIENT.read_git_diff(Path(tmp))
 
     def test_request_review_uses_protocol_specific_authentication(self):
         server = HTTPServer(("127.0.0.1", 0), ReviewHandler)
@@ -979,6 +1003,136 @@ class CodereviewClientTests(unittest.TestCase):
         with self.assertRaisesRegex(CLIENT.ClientError, "no usable text"):
             CLIENT.parse_response({"choices": []}, "openai_chat")
 
+    def test_parse_response_includes_visible_reasoning_for_three_protocols(self):
+        cases = [
+            (
+                "openai_chat",
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "reasoning_content": "chat reasoning",
+                                "content": "chat review",
+                            }
+                        }
+                    ]
+                },
+                "chat reasoning",
+                "chat review",
+            ),
+            (
+                "openai_responses",
+                {
+                    "output": [
+                        {
+                            "type": "reasoning",
+                            "summary": [
+                                {"type": "summary_text", "text": "responses summary"}
+                            ],
+                        },
+                        {
+                            "type": "message",
+                            "content": [
+                                {"type": "output_text", "text": "responses review"}
+                            ],
+                        },
+                    ]
+                },
+                "responses summary",
+                "responses review",
+            ),
+            (
+                "anthropic",
+                {
+                    "content": [
+                        {"type": "thinking", "thinking": "claude thinking"},
+                        {"type": "text", "text": "claude review"},
+                    ]
+                },
+                "claude thinking",
+                "claude review",
+            ),
+        ]
+
+        for protocol, response, reasoning, review in cases:
+            with self.subTest(protocol=protocol):
+                result = CLIENT.parse_response(response, protocol)
+                self.assertIn(
+                    f"{{Upstream reasoning or summary ({protocol}):\n{reasoning}\n}}",
+                    result,
+                )
+                self.assertIn(f"Review result:\n{review}", result)
+
+    def test_parse_response_extracts_thinking_tags_from_review_text(self):
+        result = CLIENT.parse_response(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "<think>tagged reasoning</think>\nactual review"
+                        }
+                    }
+                ]
+            },
+            "openai_chat",
+        )
+
+        self.assertIn("tagged reasoning", result)
+        self.assertIn("Review result:\nactual review", result)
+        self.assertNotIn("<think>", result)
+
+    def test_parse_response_extracts_non_ascii_tagged_reasoning_exactly(self):
+        result = CLIENT.parse_response(
+            {
+                "choices": [
+                    {"message": {"content": "<think>İ</think>\nactual review"}}
+                ]
+            },
+            "openai_chat",
+        )
+
+        self.assertIn("\nİ\n}", result)
+        self.assertNotIn("İ<", result)
+
+    def test_parse_response_preserves_literal_thinking_tags_in_review_text(self):
+        review = "Finding: code contains <think>literal</think> tag"
+
+        result = CLIENT.parse_response(
+            {"choices": [{"message": {"content": review}}]},
+            "openai_chat",
+        )
+
+        self.assertEqual(result, review)
+
+    def test_parse_response_accepts_reasoning_without_review_text(self):
+        result = CLIENT.parse_response(
+            {"choices": [{"message": {"reasoning": "reasoning only"}}]},
+            "openai_chat",
+        )
+
+        self.assertIn("\nreasoning only\n}", result)
+        self.assertIn("Review result:\n[No review text returned]", result)
+
+    def test_parse_response_accepts_pure_thinking_wrapper_without_review_text(self):
+        result = CLIENT.parse_response(
+            {"choices": [{"message": {"content": "<think>reasoning only</think>"}}]},
+            "openai_chat",
+        )
+
+        self.assertIn("\nreasoning only\n}", result)
+        self.assertIn("Review result:\n[No review text returned]", result)
+
+    def test_parse_stream_response_accepts_reasoning_without_review_text(self):
+        stream = (
+            'data: {"type":"response.reasoning_summary_text.delta","delta":"summary only"}\n\n'
+            'data: [DONE]\n\n'
+        )
+
+        result = CLIENT.parse_stream_response(stream, "openai_responses")
+
+        self.assertIn("\nsummary only\n}", result)
+        self.assertIn("Review result:\n[No review text returned]", result)
+
     def test_parse_stream_response_preserves_redacted_error_details(self):
         cases = [
             (
@@ -997,6 +1151,173 @@ class CodereviewClientTests(unittest.TestCase):
             with self.subTest(protocol=protocol):
                 with self.assertRaisesRegex(CLIENT.ClientError, expected):
                     CLIENT.parse_stream_response(stream, protocol)
+
+    def test_parse_stream_response_includes_reasoning_for_three_protocols(self):
+        cases = [
+            (
+                "openai_chat",
+                'data: {"choices":[{"delta":{"reasoning":"chat reasoning"}}]}\n\n'
+                'data: {"choices":[{"delta":{"content":"chat review"}}]}\n\n',
+                "chat reasoning",
+                "chat review",
+            ),
+            (
+                "openai_responses",
+                'data: {"type":"response.reasoning_summary_text.delta","delta":"responses summary"}\n\n'
+                'data: {"type":"response.output_text.delta","delta":"responses review"}\n\n',
+                "responses summary",
+                "responses review",
+            ),
+            (
+                "anthropic",
+                'data: {"delta":{"type":"thinking_delta","thinking":"claude thinking"}}\n\n'
+                'data: {"delta":{"type":"text_delta","text":"claude review"}}\n\n',
+                "claude thinking",
+                "claude review",
+            ),
+        ]
+
+        for protocol, stream, reasoning, review in cases:
+            with self.subTest(protocol=protocol):
+                result = CLIENT.parse_stream_response(stream, protocol)
+                self.assertIn(
+                    f"{{Upstream reasoning or summary ({protocol}):\n{reasoning}\n}}",
+                    result,
+                )
+                self.assertIn(f"Review result:\n{review}", result)
+
+    def test_parse_stream_response_joins_reasoning_character_deltas_exactly(self):
+        stream = (
+            'data: {"choices":[{"delta":{"reasoning":"rea"}}]}\n\n'
+            'data: {"choices":[{"delta":{"reasoning":"son ing"}}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"review"}}]}\n\n'
+        )
+
+        result = CLIENT.parse_stream_response(stream, "openai_chat")
+
+        self.assertIn("\nreason ing\n}", result)
+        self.assertNotIn("rea\nson ing", result)
+
+    def test_parse_stream_response_preserves_list_delta_whitespace(self):
+        stream = (
+            'data: {"choices":[{"delta":{"reasoning":[{"text":"rea "}]}}]}\n\n'
+            'data: {"choices":[{"delta":{"reasoning":[{"text":"son"}]}}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"review"}}]}\n\n'
+        )
+
+        result = CLIENT.parse_stream_response(stream, "openai_chat")
+
+        self.assertIn("\nrea son\n}", result)
+
+    def test_parse_stream_response_uses_completed_response_after_reasoning_delta(self):
+        stream = (
+            'data: {"type":"response.reasoning_summary_text.delta","delta":"summary"}\n\n'
+            'data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"review"}]}]}}\n\n'
+        )
+
+        result = CLIENT.parse_stream_response(stream, "openai_responses")
+
+        self.assertIn("\nsummary\n}", result)
+        self.assertIn("Review result:\nreview", result)
+
+    def test_stream_metadata_after_completed_cannot_hide_review_text(self):
+        stream = (
+            'data: {"type":"response.reasoning_summary_text.delta","delta":"summary"}\n\n'
+            'data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"review"}]}]}}\n\n'
+            'data: {"type":"response.rate_limits.updated","rate_limits":[]}\n\n'
+        )
+
+        result = CLIENT.parse_stream_response(stream, "openai_responses")
+
+        self.assertIn("\nsummary\n}", result)
+        self.assertIn("Review result:\nreview", result)
+
+    def test_completed_reasoning_replaces_duplicate_streamed_reasoning(self):
+        stream = (
+            'data: {"type":"response.reasoning_summary_text.delta","delta":"summary"}\n\n'
+            'data: {"type":"response.completed","response":{"output":['
+            '{"type":"reasoning","summary":[{"type":"summary_text","text":"summary"}]},'
+            '{"type":"message","content":[{"type":"output_text","text":"review"}]}'
+            ']}}\n\n'
+        )
+
+        result = CLIENT.parse_stream_response(stream, "openai_responses")
+
+        self.assertEqual(result.count("summary"), 2)
+        self.assertIn("Review result:\nreview", result)
+
+    def test_completed_reasoning_is_merged_with_streamed_review_text(self):
+        stream = (
+            'data: {"type":"response.output_text.delta","delta":"streamed review"}\n\n'
+            'data: {"type":"response.completed","response":{"output":['
+            '{"type":"reasoning","summary":[{"type":"summary_text","text":"final summary"}]},'
+            '{"type":"message","content":[{"type":"output_text","text":"final review"}]}'
+            ']}}\n\n'
+        )
+
+        result = CLIENT.parse_stream_response(stream, "openai_responses")
+
+        self.assertIn("\nfinal summary\n}", result)
+        self.assertIn("Review result:\nstreamed review", result)
+        self.assertNotIn("final review", result)
+
+    def test_in_progress_reasoning_cannot_override_streamed_reasoning(self):
+        stream = (
+            'data: {"type":"response.reasoning_summary_text.delta","delta":"stream-complete"}\n\n'
+            'data: {"type":"response.output_text.delta","delta":"streamed review"}\n\n'
+            'data: {"type":"response.in_progress","response":{"output":['
+            '{"type":"reasoning","summary":[{"type":"summary_text","text":"partial-snapshot"}]}'
+            ']}}\n\n'
+            'data: {"type":"response.completed","response":{"output":['
+            '{"type":"message","content":[{"type":"output_text","text":"final review"}]}'
+            ']}}\n\n'
+        )
+
+        result = CLIENT.parse_stream_response(stream, "openai_responses")
+
+        self.assertIn("\nstream-complete\n}", result)
+        self.assertNotIn("partial-snapshot", result)
+        self.assertIn("Review result:\nstreamed review", result)
+
+    def test_completed_review_prefix_cannot_hide_streamed_reasoning(self):
+        review = "{Upstream reasoning or summary (literal review text)"
+        stream = (
+            'data: {"type":"response.reasoning_summary_text.delta","delta":"summary"}\n\n'
+            + "data: "
+            + json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "output": [
+                            {
+                                "type": "message",
+                                "content": [{"type": "output_text", "text": review}],
+                            }
+                        ]
+                    },
+                }
+            )
+            + "\n\n"
+        )
+
+        result = CLIENT.parse_stream_response(stream, "openai_responses")
+
+        self.assertIn("\nsummary\n}", result)
+        self.assertIn(f"Review result:\n{review}", result)
+
+    def test_parse_stream_response_does_not_retain_all_delta_events(self):
+        event = 'data: {"choices":[{"delta":{"content":"0123456789abcdef0123456789abcdef"}}]}\n\n'
+        text = event * 60000
+
+        tracemalloc.start()
+        try:
+            result = CLIENT.parse_stream_response(text, "openai_chat")
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+        self.assertEqual(len(result), 32 * 60000)
+        self.assertLess(peak, 25_000_000)
 
     def test_redact_url_for_output_removes_sensitive_components(self):
         redacted = CLIENT.redact_url_for_output(

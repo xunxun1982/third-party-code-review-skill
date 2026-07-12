@@ -93,6 +93,19 @@ Set each upstream table's `PROTOCOL` to exactly one of these values:
 
 `BASE_URL` is the service root URL or a gateway mount prefix. It may include a path such as `/proxy/codereview_chat`, but it must not include the protocol endpoint path. The client appends `/v1/chat/completions`, `/v1/responses`, or `/v1/messages` according to `PROTOCOL`. A configured query is preserved on the final request URL.
 
+The client also preserves visible upstream reasoning or summary data when the selected protocol returns it. It does not add a reasoning request parameter. When reasoning is present, the output is:
+
+```text
+{Upstream reasoning or summary (<protocol>):
+<reasoning or summary text>
+}
+
+Review result:
+<review text>
+```
+
+Without reasoning, the existing plain review text is returned. Reasoning-only output is successful and uses `Review result: [No review text returned]` so upstream withdrawals or omitted final answers remain visible.
+
 For a gateway that exposes the complete route as its base, use:
 
 ```toml
@@ -101,7 +114,7 @@ BASE_URL = "https://gateway.example/direct-review"
 
 For example, `openai_chat` resolves that value to `https://gateway.example/direct-review/v1/chat/completions`. Do not configure the resolved endpoint as `BASE_URL`, or the path would be appended twice.
 
-OpenAI Responses requests set `store: false`. Omit `STREAM` to omit the request field and follow the upstream default. `STREAM = true` requests SSE, while `STREAM = false` requests one JSON response. Each mode uses one stateless HTTP request.
+OpenAI Responses requests set `store: false`. Streaming is enabled by default. `STREAM = false` requests one JSON response instead. Each mode uses one stateless HTTP request.
 
 ### OpenAI Chat Completions
 
@@ -227,7 +240,9 @@ python scripts/codereview_client.py `
   --file "tests/test_app.py"
 ```
 
-Review the current tracked diff relative to `HEAD`:
+Review the current tracked diff relative to `HEAD`. Before the first commit,
+this reviews staged files instead; run `git add` first. For a directory that is
+not a Git work tree, select files explicitly with `--file`:
 
 ```bash
 python scripts/codereview_client.py \
@@ -266,7 +281,7 @@ python scripts/codereview_client.py --question "Review this change" --stream
 python scripts/codereview_client.py --question "Review this change" --no-stream
 ```
 
-With neither flag and no `STREAM` setting, the request omits the field and the upstream chooses its default. The client parses either JSON or SSE based on the actual response.
+With neither flag and no `STREAM` setting, the request uses streaming. The client parses either JSON or SSE based on the actual response.
 
 ## Security Model
 
@@ -350,7 +365,7 @@ The tests cover:
 ## Limitations
 
 - The client sends text only; it does not upload images, PDFs, archives, or binary artifacts.
-- `--git-diff` includes tracked staged and unstaged changes relative to `HEAD`; it does not include untracked files.
+- With `HEAD`, `--git-diff` includes tracked staged and unstaged changes relative to it. Before the first commit, it includes staged files only. It never includes untracked files automatically.
 - The client does not calculate model tokens or send context-window or output-length settings. An internal bounded-capture guard protects local resources, while the upstream governs model limits.
 - The client does not split or truncate. It retries only the documented transient failures, merges at most two independently returned reviews after both tasks finish, and buffers SSE up to the response-size limit before each review is combined.
 - Secret redaction is pattern-based and cannot replace human scope review.
