@@ -546,6 +546,62 @@ class CodereviewClientTests(unittest.TestCase):
                     api_key="TEST_SECRET",
                 )
 
+    def test_response_capture_limit_is_ten_megabytes(self):
+        self.assertEqual(CLIENT.MAX_RESPONSE_BYTES, 10_000_000)
+
+    def test_response_capture_accepts_limit_and_rejects_next_byte(self):
+        self.assertEqual(
+            CLIENT._read_response_limited(
+                io.BytesIO(b"abc"),
+                CLIENT.time.monotonic() + 1,
+                max_bytes=3,
+            ),
+            b"abc",
+        )
+
+        with self.assertRaisesRegex(CLIENT.ClientError, "3-byte limit"):
+            CLIENT._read_response_limited(
+                io.BytesIO(b"abcd"),
+                CLIENT.time.monotonic() + 1,
+                max_bytes=3,
+            )
+
+    def test_request_review_applies_same_capture_limit_to_json_and_sse(self):
+        class OversizeResponse:
+            def __init__(self, content_type):
+                self.headers = {"Content-Type": content_type}
+                self.remaining = CLIENT.MAX_RESPONSE_BYTES + 1
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read1(self, size):
+                chunk_size = min(size, self.remaining)
+                self.remaining -= chunk_size
+                return b"x" * chunk_size
+
+        for content_type in ["application/json", "text/event-stream"]:
+            opener = mock.Mock()
+            opener.open.return_value = OversizeResponse(content_type)
+            with (
+                self.subTest(content_type=content_type),
+                mock.patch.object(
+                    CLIENT.urllib.request, "build_opener", return_value=opener
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    CLIENT.ClientError, "10000000-byte limit"
+                ):
+                    CLIENT.request_review(
+                        "http://127.0.0.1/review",
+                        {},
+                        timeout=5,
+                        api_key="TEST_SECRET",
+                    )
+
     def test_request_review_enforces_a_total_response_deadline(self):
         class SlowResponse:
             headers = {"Content-Type": "application/json"}
