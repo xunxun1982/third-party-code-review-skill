@@ -115,7 +115,7 @@ Each upstream may make up to `1 + MAX_RETRIES` stateless attempts. Retryable fai
 
 Every request sends `User-Agent: third-party-code-review-skill/1.0`. This identifies the client without impersonating a browser.
 
-The client does not send model context or output-length parameters for any protocol. Upstream defaults and limits therefore govern both. `anthropic` targets Anthropic-compatible Messages gateways that accept omitted `max_tokens`; it does not claim direct compatibility with the official Anthropic endpoint, where `max_tokens` is normally required. The `anthropic-version` header uses a client-internal compatibility value and is not configurable.
+The client does not send model context or output-length parameters for any protocol. Upstream defaults and limits therefore govern both. Raw response capture accepts up to and including `10000000` bytes per upstream attempt and rejects the next byte for resource safety. `anthropic` targets Anthropic-compatible Messages gateways that accept omitted `max_tokens`; it does not claim direct compatibility with the official Anthropic endpoint, where `max_tokens` is normally required. The `anthropic-version` header uses a client-internal compatibility value and is not configurable.
 
 ## Tool Policy
 
@@ -131,7 +131,7 @@ Any future tool support requires a separate opt-in design with a per-tool allowl
 - Redirects are refused so authentication headers remain on the configured endpoint.
 - Git diff collection uses NUL-delimited path inspection, rejects blocked paths, and disables rename detection, external diff drivers, and text conversion.
 - Files, Git output, and API responses are read in bounded chunks. Oversized input is rejected during capture instead of after an unbounded read.
-- The configured HTTP timeout is tracked with a monotonic total deadline while the response body is read; response bytes remain capped at `1000000`.
+- The configured HTTP timeout is tracked with a monotonic total deadline while the response body is read; responses of at most `10000000` bytes are accepted.
 - Successful and error responses have terminal control characters removed and common secret-like values redacted before output.
 - Characters unsupported by the active console encoding are emitted as backslash escapes so arbitrary upstream Unicode cannot terminate local output.
 - Plain HTTP is allowed for trusted configured endpoints, including internal relays and domains that local DNS or Clash resolves to internal addresses. The client does not block by resolved IP and warns for each plain-HTTP upstream.

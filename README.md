@@ -49,7 +49,7 @@ Enabled tables are evaluated in declaration order. The client sends the same scr
 
 `MAX_RETRIES = 3` means three retries after the initial request, for up to four attempts per upstream. Valid values are `0` through `10`; `0` disables retries for that upstream. Retries wait 1, 2, and 4 seconds by default, with later waits capped at 8 seconds.
 
-The client does not declare a model context window or output length. Each upstream applies its own supported limits and defaults. Local capture remains bounded internally for resource safety; that implementation guard is not a model setting or user configuration.
+The client does not declare a model context window or output length. Each upstream applies its own supported limits and defaults. Local capture accepts up to and including `10000000` raw response bytes per upstream attempt and rejects the next byte for resource safety; that implementation guard is not a model setting or user configuration.
 
 Do not commit a real API key. The repository ignores skill-local `config.toml`, but the user config path is preferred because it survives repository updates and stays outside version control.
 
@@ -327,7 +327,7 @@ Trusted configured endpoints may use plain HTTP, including internal relays and d
 
 OpenAI Responses requests include `store: false`. Storage and training policies of custom proxies remain server-side concerns and must be verified with the service operator.
 
-Redirects are refused so API credentials remain on the exact configured endpoint. `TIMEOUT_SECONDS` is enforced separately for every attempt as a monotonic total response deadline, and response capture is bounded to `1000000` bytes. Transport failures, timeouts, HTTP 408/429/5xx, invalid UTF-8, invalid JSON/SSE, and responses with no usable text are retryable. Redirects, other 4xx responses, configuration errors, and local input errors are not retried.
+Redirects are refused so API credentials remain on the exact configured endpoint. `TIMEOUT_SECONDS` is enforced separately for every attempt as a monotonic total response deadline, and response capture accepts at most `10000000` bytes. Transport failures, timeouts, HTTP 408/429/5xx, invalid UTF-8, invalid JSON/SSE, and responses with no usable text are retryable. Redirects, other 4xx responses, configuration errors, and local input errors are not retried.
 
 ### Untrusted response
 
@@ -366,8 +366,8 @@ The tests cover:
 
 - The client sends text only; it does not upload images, PDFs, archives, or binary artifacts.
 - With `HEAD`, `--git-diff` includes tracked staged and unstaged changes relative to it. Before the first commit, it includes staged files only. It never includes untracked files automatically.
-- The client does not calculate model tokens or send context-window or output-length settings. An internal bounded-capture guard protects local resources, while the upstream governs model limits.
-- The client does not split or truncate. It retries only the documented transient failures, merges at most two independently returned reviews after both tasks finish, and buffers SSE up to the response-size limit before each review is combined.
+- The client does not calculate model tokens or send context-window or output-length settings. An internal `10000000`-byte raw-response guard protects local resources, while the upstream governs model limits.
+- The client does not split or truncate. It retries only the documented transient failures, merges at most two independently returned reviews after both tasks finish, and buffers SSE under the same raw-response limit before each review is combined.
 - Secret redaction is pattern-based and cannot replace human scope review.
 - Compatible proxies vary in optional parameter support, so all protocol payloads omit output-length parameters. Official Anthropic Messages normally requires `max_tokens`; `anthropic` mode therefore requires an upstream that accepts its omission.
 - Protocol selection controls request JSON, authentication headers, and response parsing only. It does not verify that a custom endpoint actually implements the selected protocol until a request is made.

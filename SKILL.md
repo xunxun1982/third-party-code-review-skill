@@ -58,7 +58,7 @@ Use `python scripts/codereview_client.py --help` for one-call overrides.
 - Reject `.env*`, `config.toml`, credential files, private keys, certificates, binary files, links, junction escapes, and tracked diffs containing blocked paths. Disable Git rename detection so both deletion and addition paths remain visible.
 - Redact common keys, tokens, passwords, authorization values, private-key blocks, and secret-like response text. Remove terminal control characters before output.
 - Escape response characters that the active console encoding cannot represent, preserving the command result instead of failing during display.
-- Let each upstream govern its context and output limits. Keep the internal bounded-capture guard as a local resource-safety implementation detail.
+- Let each upstream govern its context and output limits. Keep the internal raw-response capture guard, which accepts at most `10000000` bytes per attempt, as a local resource-safety implementation detail.
 - Send no `tools` field and provide no local Web, Shell, MCP, function-calling, code-execution, or filesystem bridge. Server-side upstream capabilities remain outside client control.
 - Read local files, Git output, and API responses in bounded chunks. Enforce the configured HTTP timeout as a total response deadline.
 - Allow trusted HTTP endpoints, including internal relays and locally rewritten DNS results, with a warning per HTTP upstream. Refuse redirects so credentials stay on the configured endpoint.
