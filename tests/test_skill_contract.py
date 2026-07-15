@@ -14,6 +14,24 @@ GITIGNORE = SKILL_ROOT / ".gitignore"
 
 
 class SkillContractTests(unittest.TestCase):
+    def assert_client_simulation_documented(self, text):
+        for phrase in [
+            "SIMULATED_CLIENT",
+            "disabled by default",
+            "openai_chat does not currently support client simulation",
+            "streaming and non-streaming requests",
+        ]:
+            self.assertIn(phrase, text)
+        for protocol, profile in [
+            ("openai_chat", "Unsupported"),
+            ("openai_responses", "Codex CLI 0.144.4"),
+            ("anthropic", "Claude Code 2.1.210"),
+        ]:
+            self.assertRegex(
+                text,
+                rf"(?m)^\| `{protocol}` \|[^\n]*{re.escape(profile)}[^\n]*\|$",
+            )
+
     def test_skill_repository_contains_no_han_characters(self):
         text_files = [
             path
@@ -62,6 +80,7 @@ class SkillContractTests(unittest.TestCase):
             "No review text returned",
         ]:
             self.assertIn(phrase, text)
+        self.assert_client_simulation_documented(text)
 
     def test_readme_is_detailed_and_uses_the_portable_entry_point(self):
         text = README.read_text(encoding="utf-8")
@@ -100,6 +119,7 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("visible upstream reasoning or summary", text)
         self.assertIn("Review result", text)
         self.assertIn("No review text returned", text)
+        self.assert_client_simulation_documented(text)
         for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"]:
             self.assertIn(path, text)
 
@@ -132,6 +152,7 @@ class SkillContractTests(unittest.TestCase):
             self.assertEqual(upstream["TIMEOUT_SECONDS"], 600)
             self.assertEqual(upstream["MAX_RETRIES"], 3)
             self.assertTrue(upstream["STREAM"])
+            self.assertIs(upstream["SIMULATED_CLIENT"], False)
         self.assertNotIn("API_URL", text)
         self.assertNotIn("API_BASE", text)
         self.assertNotIn("API_PATH", text)
@@ -198,6 +219,13 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("thinking_delta", text)
         self.assertIn("Review result", text)
         self.assertIn("No review text returned", text)
+        for phrase in [
+            "`SIMULATED_CLIENT` | `false`; boolean",
+            "no environment-variable or command-line override",
+            '"simulated_client"',
+        ]:
+            self.assertIn(phrase, text)
+        self.assert_client_simulation_documented(text)
 
     def test_local_process_files_are_git_ignored(self):
         lines = GITIGNORE.read_text(encoding="utf-8").splitlines()

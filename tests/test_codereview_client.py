@@ -1,4 +1,5 @@
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -52,6 +53,32 @@ class ReviewHandler(BaseHTTPRequestHandler):
                 'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"stream"}}\n\n'
             ).encode("utf-8")
             content_type = "text/event-stream"
+        elif self.path == "/responses":
+            body = json.dumps(
+                {
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": "responses json",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+            content_type = "application/json"
+        elif self.path == "/claude":
+            body = json.dumps(
+                {
+                    "content": [
+                        {"type": "text", "text": "claude json"}
+                    ]
+                }
+            ).encode("utf-8")
+            content_type = "application/json"
         elif self.path == "/control":
             body = json.dumps(
                 {
@@ -150,6 +177,438 @@ class CodereviewClientTests(unittest.TestCase):
             '"path": "a&\\\"<file>.py"',
             escaped["messages"][1]["content"],
         )
+
+    def test_prepare_codex_profile_is_in_place_consistent_and_idempotent(self):
+        self.assertTrue(
+            hasattr(CLIENT, "_prepare_simulated_client_payload"),
+            "simulated client payload preparation is missing",
+        )
+        large_input = "x" * 1_000_000
+        payload = {
+            "model": "gpt-5",
+            "input": large_input,
+            "stream": True,
+        }
+        ids = [CLIENT.uuid.UUID(int=value) for value in range(1, 6)]
+
+        with mock.patch.object(CLIENT.uuid, "uuid4", side_effect=ids):
+            prepared = CLIENT._prepare_simulated_client_payload(
+                payload, "openai_responses"
+            )
+            prepared_again = CLIENT._prepare_simulated_client_payload(
+                payload, "openai_responses"
+            )
+
+        self.assertIs(prepared, payload)
+        self.assertIs(prepared_again, payload)
+        self.assertIs(payload["input"], large_input)
+        metadata = payload["client_metadata"]
+        turn = json.loads(metadata["x-codex-turn-metadata"])
+        self.assertEqual(
+            metadata["x-codex-installation-id"],
+            turn["installation_id"],
+        )
+        self.assertEqual(metadata["session_id"], turn["session_id"])
+        self.assertEqual(metadata["thread_id"], turn["thread_id"])
+        self.assertEqual(metadata["turn_id"], turn["turn_id"])
+        self.assertEqual(
+            metadata["x-codex-window-id"], turn["window_id"]
+        )
+        self.assertEqual(turn["request_kind"], "turn")
+
+    def test_prepare_claude_code_profile_is_consistent_and_idempotent(self):
+        self.assertTrue(
+            hasattr(CLIENT, "_prepare_simulated_client_payload"),
+            "simulated client payload preparation is missing",
+        )
+        original_system = "Review only the supplied code."
+        messages = [{"role": "user", "content": "Review"}]
+        payload = {
+            "model": "claude-review",
+            "system": original_system,
+            "messages": messages,
+        }
+        session_id = CLIENT.uuid.UUID(
+            "11111111-2222-3333-4444-555555555555"
+        )
+
+        with (
+            mock.patch.object(CLIENT.uuid, "uuid4", return_value=session_id),
+            mock.patch.object(
+                CLIENT.secrets,
+                "token_hex",
+                return_value="ab" * 32,
+            ),
+        ):
+            CLIENT._prepare_simulated_client_payload(payload, "anthropic")
+            CLIENT._prepare_simulated_client_payload(payload, "anthropic")
+
+        identity = json.loads(payload["metadata"]["user_id"])
+        self.assertEqual(identity["device_id"], "ab" * 32)
+        self.assertEqual(identity["account_uuid"], "")
+        self.assertEqual(identity["session_id"], str(session_id))
+        self.assertEqual(len(payload["system"]), 2)
+        self.assertEqual(
+            payload["system"][0]["text"],
+            CLIENT.CLAUDE_CODE_SYSTEM_PROMPT,
+        )
+        self.assertEqual(
+            payload["system"][0]["cache_control"],
+            {"type": "ephemeral"},
+        )
+        self.assertEqual(payload["system"][1]["text"], original_system)
+        self.assertIs(payload["messages"], messages)
+        self.assertNotIn("max_tokens", payload)
+        self.assertNotIn("tools", payload)
+
+    def test_prepare_claude_code_profile_preserves_existing_identity_text(self):
+        system = (
+            f"{CLIENT.CLAUDE_CODE_SYSTEM_PROMPT}\n"
+            "Review only the supplied code."
+        )
+        payload = {
+            "model": "claude-review",
+            "system": system,
+            "messages": [{"role": "user", "content": "Review"}],
+        }
+
+        CLIENT._prepare_simulated_client_payload(payload, "anthropic")
+
+        self.assertEqual(
+            payload["system"],
+            [{"type": "text", "text": system}],
+        )
+
+    def _send_simulated_request(
+        self,
+        path: str,
+        payload: dict[str, object],
+        protocol: str,
+    ) -> str:
+        server = HTTPServer(("127.0.0.1", 0), ReviewHandler)
+        thread = threading.Thread(
+            target=server.serve_forever, daemon=True
+        )
+        thread.start()
+        url = f"http://127.0.0.1:{server.server_port}{path}"
+        try:
+            return CLIENT._request_with_retries(
+                CLIENT.request_review,
+                url,
+                payload,
+                5,
+                api_key="TEST_SECRET",
+                protocol=protocol,
+                max_retries=0,
+                simulated_client=True,
+            )
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
+    def test_build_headers_applies_complete_simulated_profiles(self):
+        self.assertIn(
+            "simulated_client",
+            inspect.signature(CLIENT.build_headers).parameters,
+            "build_headers has no simulated client switch",
+        )
+        codex_payload = {"model": "gpt-5", "stream": False}
+        CLIENT._prepare_simulated_client_payload(
+            codex_payload, "openai_responses"
+        )
+
+        codex = CLIENT.build_headers(
+            "openai_responses",
+            "TEST_SECRET",
+            codex_payload,
+            simulated_client=True,
+        )
+
+        codex_metadata = codex_payload["client_metadata"]
+        self.assertEqual(codex["User-Agent"], CLIENT.CODEX_USER_AGENT)
+        self.assertEqual(codex["Version"], CLIENT.CODEX_VERSION)
+        self.assertEqual(codex["originator"], "codex-tui")
+        self.assertEqual(
+            codex["OpenAI-Beta"], "responses=experimental"
+        )
+        self.assertEqual(codex["Content-Type"], "application/json")
+        self.assertEqual(codex["Accept"], "application/json")
+        self.assertEqual(
+            codex["X-Codex-Installation-Id"],
+            codex_metadata["x-codex-installation-id"],
+        )
+        self.assertEqual(
+            codex["x-client-request-id"],
+            codex_metadata["thread_id"],
+        )
+
+        claude_payload = {
+            "model": "claude-review",
+            "system": "Review",
+        }
+        CLIENT._prepare_simulated_client_payload(
+            claude_payload, "anthropic"
+        )
+        claude = CLIENT.build_headers(
+            "anthropic",
+            "TEST_SECRET",
+            claude_payload,
+            simulated_client=True,
+        )
+        identity = json.loads(
+            claude_payload["metadata"]["user_id"]
+        )
+        self.assertEqual(
+            claude["User-Agent"], CLIENT.CLAUDE_CODE_USER_AGENT
+        )
+        self.assertEqual(claude["X-App"], "cli")
+        self.assertEqual(
+            claude["X-Claude-Code-Session-Id"],
+            identity["session_id"],
+        )
+        self.assertEqual(claude["X-Stainless-Lang"], "js")
+        self.assertEqual(claude["X-Stainless-Runtime"], "node")
+        self.assertEqual(
+            claude["Anthropic-Dangerous-Direct-Browser-Access"],
+            "true",
+        )
+
+    def test_build_headers_normalizes_conflicting_codex_identity(self):
+        payload = {
+            "model": "gpt-5",
+            "stream": False,
+            "client_metadata": {
+                "x-codex-installation-id": "flat-installation",
+                "session_id": "flat-session",
+                "thread_id": "flat-thread",
+                "turn_id": "flat-turn",
+                "x-codex-window-id": "flat-window",
+                "x-codex-turn-metadata": json.dumps(
+                    {
+                        "installation_id": "stale-installation",
+                        "session_id": "stale-session",
+                        "thread_id": "stale-thread",
+                        "turn_id": "stale-turn",
+                        "window_id": "stale-window",
+                    }
+                ),
+            },
+        }
+
+        headers = CLIENT.build_headers(
+            "openai_responses",
+            "TEST_SECRET",
+            payload,
+            simulated_client=True,
+        )
+
+        metadata = payload["client_metadata"]
+        turn = json.loads(metadata["x-codex-turn-metadata"])
+        fields = (
+            ("x-codex-installation-id", "installation_id"),
+            ("session_id", "session_id"),
+            ("thread_id", "thread_id"),
+            ("turn_id", "turn_id"),
+            ("x-codex-window-id", "window_id"),
+        )
+        for metadata_key, turn_key in fields:
+            with self.subTest(field=metadata_key):
+                self.assertEqual(metadata[metadata_key], turn[turn_key])
+        self.assertEqual(
+            headers["X-Codex-Turn-Metadata"],
+            metadata["x-codex-turn-metadata"],
+        )
+
+    def test_simulated_codex_request_matches_wire_profile(self):
+        self.assertIn(
+            "simulated_client",
+            inspect.signature(CLIENT._request_with_retries).parameters,
+            "retry layer has no simulated client switch",
+        )
+        payload = CLIENT.build_payload(
+            "Review", [], "gpt-5", "openai_responses", True
+        )
+
+        result = self._send_simulated_request(
+            "/stream/responses", payload, "openai_responses"
+        )
+
+        self.assertEqual(result, "responses stream")
+        headers = ReviewHandler.request_headers
+        request_json = ReviewHandler.request_json
+        self.assertEqual(headers["User-Agent"], CLIENT.CODEX_USER_AGENT)
+        self.assertEqual(headers["Version"], CLIENT.CODEX_VERSION)
+        self.assertEqual(headers["originator"], "codex-tui")
+        self.assertEqual(
+            headers["OpenAI-Beta"], "responses=experimental"
+        )
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(headers["Accept"], "text/event-stream")
+        self.assertEqual(
+            headers["Authorization"], "Bearer TEST_SECRET"
+        )
+        metadata = request_json["client_metadata"]
+        turn = json.loads(headers["X-Codex-Turn-Metadata"])
+        self.assertEqual(
+            headers["X-Codex-Installation-Id"],
+            metadata["x-codex-installation-id"],
+        )
+        self.assertEqual(
+            metadata["x-codex-installation-id"],
+            turn["installation_id"],
+        )
+        self.assertEqual(headers["Session-Id"], metadata["session_id"])
+        self.assertEqual(headers["Thread-Id"], metadata["thread_id"])
+        self.assertEqual(
+            headers["x-client-request-id"], metadata["thread_id"]
+        )
+        self.assertEqual(
+            headers["X-Codex-Window-Id"],
+            metadata["x-codex-window-id"],
+        )
+        self.assertEqual(
+            headers["X-Codex-Turn-Metadata"],
+            metadata["x-codex-turn-metadata"],
+        )
+        self.assertEqual(turn["request_kind"], "turn")
+
+    def test_simulated_claude_request_matches_wire_profile(self):
+        self.assertIn(
+            "simulated_client",
+            inspect.signature(CLIENT._request_with_retries).parameters,
+            "retry layer has no simulated client switch",
+        )
+        payload = CLIENT.build_payload(
+            "Review", [], "claude-review", "anthropic", True
+        )
+
+        result = self._send_simulated_request(
+            "/stream/claude", payload, "anthropic"
+        )
+
+        self.assertEqual(result, "claude stream")
+        headers = ReviewHandler.request_headers
+        request_json = ReviewHandler.request_json
+        self.assertEqual(
+            headers["User-Agent"], CLIENT.CLAUDE_CODE_USER_AGENT
+        )
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(headers["Accept"], "application/json")
+        self.assertEqual(headers["x-api-key"], "TEST_SECRET")
+        self.assertIsNone(headers["Authorization"])
+        self.assertEqual(headers["X-App"], "cli")
+        self.assertEqual(
+            headers["anthropic-version"], "2023-06-01"
+        )
+        beta = {
+            token.strip()
+            for token in headers["anthropic-beta"].split(",")
+        }
+        self.assertEqual(beta, set(CLIENT.CLAUDE_CODE_BETA_TOKENS))
+        self.assertEqual(
+            headers["Anthropic-Dangerous-Direct-Browser-Access"],
+            "true",
+        )
+        stainless = {
+            "X-Stainless-Lang": "js",
+            "X-Stainless-Package-Version": "0.94.0",
+            "X-Stainless-OS": "Linux",
+            "X-Stainless-Arch": "arm64",
+            "X-Stainless-Runtime": "node",
+            "X-Stainless-Runtime-Version": "v24.3.0",
+            "X-Stainless-Retry-Count": "0",
+            "X-Stainless-Timeout": "600",
+        }
+        for key, value in stainless.items():
+            with self.subTest(header=key):
+                self.assertEqual(headers[key], value)
+        identity = json.loads(request_json["metadata"]["user_id"])
+        self.assertEqual(
+            headers["X-Claude-Code-Session-Id"],
+            identity["session_id"],
+        )
+        self.assertEqual(len(identity["device_id"]), 64)
+        self.assertTrue(
+            all(
+                character in "0123456789abcdef"
+                for character in identity["device_id"]
+            )
+        )
+        self.assertEqual(identity["account_uuid"], "")
+        self.assertEqual(
+            request_json["system"][0]["text"],
+            CLIENT.CLAUDE_CODE_SYSTEM_PROMPT,
+        )
+        self.assertIn(
+            "read-only code reviewer",
+            request_json["system"][1]["text"],
+        )
+        self.assertNotIn("max_tokens", request_json)
+        self.assertNotIn("temperature", request_json)
+        self.assertNotIn("tools", request_json)
+
+    def test_simulated_profiles_preserve_non_streaming_requests(self):
+        self.assertIn(
+            "simulated_client",
+            inspect.signature(CLIENT._request_with_retries).parameters,
+            "retry layer has no simulated client switch",
+        )
+        cases = [
+            (
+                "openai_responses",
+                "/responses",
+                "gpt-5",
+                "responses json",
+                "application/json",
+                CLIENT.CODEX_USER_AGENT,
+            ),
+            (
+                "anthropic",
+                "/claude",
+                "claude-review",
+                "claude json",
+                "application/json",
+                CLIENT.CLAUDE_CODE_USER_AGENT,
+            ),
+        ]
+
+        for protocol, path, model, expected, accept, user_agent in cases:
+            with self.subTest(protocol=protocol):
+                payload = CLIENT.build_payload(
+                    "Review", [], model, protocol, False
+                )
+                result = self._send_simulated_request(
+                    path, payload, protocol
+                )
+
+                self.assertEqual(result, expected)
+                request_json = ReviewHandler.request_json
+                headers = ReviewHandler.request_headers
+                self.assertFalse(request_json["stream"])
+                self.assertEqual(headers["Accept"], accept)
+                self.assertEqual(headers["User-Agent"], user_agent)
+                if protocol == "openai_responses":
+                    metadata = request_json["client_metadata"]
+                    self.assertEqual(
+                        headers["Authorization"], "Bearer TEST_SECRET"
+                    )
+                    self.assertEqual(
+                        headers["X-Codex-Installation-Id"],
+                        metadata["x-codex-installation-id"],
+                    )
+                else:
+                    identity = json.loads(
+                        request_json["metadata"]["user_id"]
+                    )
+                    self.assertEqual(headers["x-api-key"], "TEST_SECRET")
+                    self.assertEqual(
+                        headers["X-Claude-Code-Session-Id"],
+                        identity["session_id"],
+                    )
+                self.assertNotIn("max_tokens", request_json)
+                self.assertNotIn("temperature", request_json)
+                self.assertNotIn("tools", request_json)
 
     def test_build_request_url_appends_protocol_path_to_base_or_prefix(self):
         cases = [
@@ -760,6 +1219,122 @@ class CodereviewClientTests(unittest.TestCase):
         self.assertEqual(result, "review result")
         self.assertEqual(len(attempts), 6)
         self.assertEqual(sleeps, [1, 2, 4, 8, 8])
+
+    def test_request_retries_prepare_profile_once_and_reuse_payload(self):
+        self.assertIn(
+            "simulated_client",
+            inspect.signature(CLIENT._request_with_retries).parameters,
+            "retry layer has no simulated client switch",
+        )
+        payload = {"model": "gpt-5", "input": "Review"}
+        attempts = []
+
+        def requester(url, candidate, timeout, **kwargs):
+            attempts.append(
+                (
+                    id(candidate),
+                    candidate["client_metadata"]["session_id"],
+                    kwargs["simulated_client"],
+                )
+            )
+            if len(attempts) == 1:
+                raise CLIENT.RetryableClientError("retry")
+            return "review"
+
+        with mock.patch.object(
+            CLIENT,
+            "_prepare_simulated_client_payload",
+            wraps=CLIENT._prepare_simulated_client_payload,
+        ) as prepare:
+            result = CLIENT._request_with_retries(
+                requester,
+                "https://review.test/v1/responses",
+                payload,
+                30,
+                api_key="TEST_SECRET",
+                protocol="openai_responses",
+                max_retries=1,
+                simulated_client=True,
+                sleeper=lambda seconds: None,
+            )
+
+        self.assertEqual(result, "review")
+        prepare.assert_called_once_with(payload, "openai_responses")
+        self.assertEqual(len({item[0] for item in attempts}), 1)
+        self.assertEqual(len({item[1] for item in attempts}), 1)
+        self.assertTrue(all(item[2] for item in attempts))
+
+    def test_anthropic_retries_reuse_prepared_headers(self):
+        payload = {
+            "model": "claude-review",
+            "system": "Review only the supplied code.",
+            "messages": [{"role": "user", "content": "Review"}],
+        }
+        sessions = []
+
+        def requester(url, candidate, timeout, **kwargs):
+            headers = kwargs.get("prepared_headers")
+            if headers is None:
+                headers = CLIENT.build_headers(
+                    kwargs["protocol"],
+                    kwargs["api_key"],
+                    candidate,
+                    simulated_client=kwargs["simulated_client"],
+                )
+            sessions.append(headers["X-Claude-Code-Session-Id"])
+            if len(sessions) == 1:
+                raise CLIENT.RetryableClientError("retry")
+            return "review"
+
+        with mock.patch.object(
+            CLIENT.json, "loads", wraps=CLIENT.json.loads
+        ) as loads:
+            result = CLIENT._request_with_retries(
+                requester,
+                "https://review.test/v1/messages",
+                payload,
+                30,
+                api_key="TEST_SECRET",
+                protocol="anthropic",
+                max_retries=1,
+                simulated_client=True,
+                sleeper=lambda seconds: None,
+            )
+
+        self.assertEqual(result, "review")
+        self.assertEqual(loads.call_count, 1)
+        self.assertEqual(len(set(sessions)), 1)
+
+    def test_disabled_profile_does_no_preparation_work(self):
+        self.assertIn(
+            "simulated_client",
+            inspect.signature(CLIENT._request_with_retries).parameters,
+            "retry layer has no simulated client switch",
+        )
+        payload = {"model": "review", "input": "x" * 1_000_000}
+        with (
+            mock.patch.object(
+                CLIENT, "_prepare_simulated_client_payload"
+            ) as prepare,
+            mock.patch.object(CLIENT.uuid, "uuid4") as new_uuid,
+            mock.patch.object(CLIENT.secrets, "token_hex") as token_hex,
+        ):
+            result = CLIENT._request_with_retries(
+                lambda *args, **kwargs: "review",
+                "https://review.test/v1/responses",
+                payload,
+                30,
+                api_key="TEST_SECRET",
+                protocol="openai_responses",
+                max_retries=0,
+                simulated_client=False,
+            )
+
+        self.assertEqual(result, "review")
+        prepare.assert_not_called()
+        new_uuid.assert_not_called()
+        token_hex.assert_not_called()
+        self.assertNotIn("client_metadata", payload)
 
     def test_request_with_retries_reports_exhausted_attempts(self):
         attempts = 0

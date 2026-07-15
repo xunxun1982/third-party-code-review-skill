@@ -43,9 +43,13 @@ MODEL = "codereview"
 API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
+STREAM = true
+SIMULATED_CLIENT = false
 ```
 
 Enabled tables are evaluated in declaration order. The client sends the same screened scope to the first two enabled upstreams concurrently, ignores later enabled tables with a warning, and combines responses under `Upstream 1` and `Upstream 2` headings. Each selected table may use a different protocol, model, URL, timeout, API key, retry count, and streaming mode. Each upstream has an independent retry counter: one may succeed without retrying while the other uses its configured retries. The client waits for both before combining results. One failed upstream does not discard a successful result from the other; the command fails only when every selected upstream fails.
+
+`SIMULATED_CLIENT` is a per-upstream TOML boolean and is disabled by default. There is no environment-variable or command-line override. openai_chat does not currently support client simulation and fails configuration when the switch is `true`. An enabled profile is prepared once per upstream and reused across retries for streaming and non-streaming requests.
 
 `MAX_RETRIES = 3` means three retries after the initial request, for up to four attempts per upstream. Valid values are `0` through `10`; `0` disables retries for that upstream. Retries wait 1, 2, and 4 seconds by default, with later waits capped at 8 seconds.
 
@@ -84,6 +88,12 @@ See [references/configuration.md](references/configuration.md) for every field, 
 ## Protocols
 
 Set each upstream table's `PROTOCOL` to exactly one of these values:
+
+| Protocol | `SIMULATED_CLIENT = false` | `SIMULATED_CLIENT = true` |
+|---|---|---|
+| `openai_chat` | Generic `third-party-code-review-skill/1.0` client | Unsupported; configuration fails |
+| `openai_responses` | Generic client | Codex CLI 0.144.4 |
+| `anthropic` | Generic client | Claude Code 2.1.210 |
 
 | Value | Request shape | Authentication | Parsed response text |
 |---|---|---|---|
@@ -129,6 +139,8 @@ MODEL = "codereview"
 API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
+STREAM = true
+SIMULATED_CLIENT = false
 ```
 
 The client sends:
@@ -145,6 +157,8 @@ The client sends:
 
 The key is sent as `Authorization: Bearer ...`. Text is read from `choices[0].message.content`. The compatibility payload intentionally omits output-token parameters because third-party Chat-compatible gateways differ on `max_tokens` and `max_completion_tokens` support.
 
+Keep `SIMULATED_CLIENT = false` for this protocol. Client simulation is not currently implemented for OpenAI Chat Completions.
+
 ### OpenAI Responses
 
 Choose this mode for endpoints that implement the OpenAI Responses shape.
@@ -158,6 +172,8 @@ MODEL = "responses-review-model"
 API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
+STREAM = true
+SIMULATED_CLIENT = false
 ```
 
 The client sends:
@@ -173,6 +189,8 @@ The client sends:
 
 The key is sent as `Authorization: Bearer ...`. Text is collected from message output blocks whose type is `output_text`; an `output_text` helper string is also accepted for compatible proxies.
 
+With `SIMULATED_CLIENT = true`, the request uses the pinned Codex CLI 0.144.4 TUI User-Agent, version and originator headers, Codex installation/session/thread/window/turn identity headers, and matching `client_metadata`. Streaming requests advertise SSE while non-streaming requests advertise JSON. Bearer authentication and the existing Responses fields remain unchanged; the profile adds no output-length, temperature, or tools field. See [references/configuration.md](references/configuration.md#client-simulation) for the complete observable profile.
+
 ### Anthropic-compatible Messages
 
 Choose this mode for Anthropic-compatible gateways that implement the Messages shape and accept an upstream-defined output limit. It is not a direct compatibility promise for the official Anthropic endpoint, where `max_tokens` is normally required.
@@ -186,6 +204,8 @@ MODEL = "claude-review-model"
 API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
+STREAM = true
+SIMULATED_CLIENT = false
 ```
 
 The client sends:
@@ -201,6 +221,8 @@ The client sends:
 ```
 
 The key is sent in `x-api-key`. The client supplies an internal compatibility value in the `anthropic-version` header; it is not configurable. The upstream must accept omitted `max_tokens` and provide its own output default. Text is joined from response content blocks whose type is `text`.
+
+With `SIMULATED_CLIENT = true`, the request uses the pinned Claude Code 2.1.210 CLI User-Agent, Claude beta and Stainless headers, a stable session header, matching `metadata.user_id`, and an ephemeral Claude Code identity system block before the review policy. The same profile is used in both response modes. `x-api-key` authentication remains unchanged, and the profile adds no `max_tokens`, temperature, or tools field. See [references/configuration.md](references/configuration.md#client-simulation) for the complete observable profile.
 
 ## Usage
 
@@ -218,7 +240,7 @@ Inspect the effective configuration without sending a request:
 python scripts/codereview_client.py doctor
 ```
 
-The redacted JSON reports `active_config_source`, candidate config files with `exists` flags, environment variables as present or absent, enabled and ignored upstream counts, and each selected upstream's protocol, model, sanitized `base_url`, resolved `request_url`, key-presence flag, `max_retries`, and stream mode. It never prints API-key values, removes URL user information, query strings, and fragments, and does not perform a network request.
+The redacted JSON reports `active_config_source`, candidate config files with `exists` flags, environment variables as present or absent, enabled and ignored upstream counts, and each selected upstream's protocol, model, sanitized `base_url`, resolved `request_url`, key-presence flag, `max_retries`, stream mode, and `simulated_client` state. It never prints API-key values, removes URL user information, query strings, and fragments, and does not perform a network request.
 
 Review selected files:
 
@@ -272,7 +294,7 @@ python scripts/codereview_client.py \
 
 The client runs at most two upstream tasks concurrently. Each task may make up to `1 + MAX_RETRIES` requests with its own independent counter; the default is up to four attempts per upstream and eight attempts across two upstreams. If the selected scope exceeds the internal capture ceiling, bounded capture stops and rejects the scope; reduce it and run a new explicitly chosen review instead of relying on automatic truncation or request chunking.
 
-Every request sends `User-Agent: third-party-code-review-skill/1.0`. This is a stable product identifier, not a browser impersonation string.
+With client simulation disabled, every request sends `User-Agent: third-party-code-review-skill/1.0`. Enabling the supported per-upstream profile replaces that generic identifier with the pinned Codex CLI or Claude Code identity described under Protocols.
 
 Streaming can be overridden for one call:
 
@@ -351,6 +373,7 @@ The tests cover:
 
 - Three protocol payload shapes with no tools.
 - Omitted, explicit streaming, explicit non-streaming, and three protocol-specific SSE formats.
+- Complete Codex CLI and Claude Code profiles for streaming and non-streaming requests, stable retry identity, and a zero-preparation disabled path.
 - Protocol-specific authentication headers.
 - Chat, Responses, and Anthropic-compatible text extraction.
 - Fixed and named upstream tables, disabled entries, and the first-two-enabled limit.
@@ -370,7 +393,7 @@ The tests cover:
 - The client does not split or truncate. It retries only the documented transient failures, merges at most two independently returned reviews after both tasks finish, and buffers SSE under the same raw-response limit before each review is combined.
 - Secret redaction is pattern-based and cannot replace human scope review.
 - Compatible proxies vary in optional parameter support, so all protocol payloads omit output-length parameters. Official Anthropic Messages normally requires `max_tokens`; `anthropic` mode therefore requires an upstream that accepts its omission.
-- Protocol selection controls request JSON, authentication headers, and response parsing only. It does not verify that a custom endpoint actually implements the selected protocol until a request is made.
+- Protocol selection controls request JSON, authentication, and response parsing. Optional client simulation also changes the documented headers and identity metadata; the client cannot verify that a custom endpoint recognizes either profile until a request is made.
 
 ## References
 

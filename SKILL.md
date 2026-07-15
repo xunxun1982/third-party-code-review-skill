@@ -17,7 +17,7 @@ Do not run the client from the repository being reviewed or hard-code the instal
 
 ## Upstream Routing
 
-Read [references/configuration.md](references/configuration.md) before configuring credentials, protocols, limits, streaming, or multiple upstreams.
+Read [references/configuration.md](references/configuration.md) before configuring credentials, protocols, client simulation, limits, streaming, or multiple upstreams.
 
 - Configure `UPSTREAM<number>` or `UPSTREAM_<name>` TOML tables.
 - Select enabled tables in declaration order. Send concurrently to the first two, ignore later enabled tables with a warning, and label results `Upstream 1` and `Upstream 2`.
@@ -25,13 +25,13 @@ Read [references/configuration.md](references/configuration.md) before configuri
 - Give each selected upstream an independent retry counter. `MAX_RETRIES` defaults to `3`, so one upstream may finish immediately while another makes up to four attempts; wait for both before combining results.
 - Allow each selected table to use a different protocol, model, URL, key, timeout, retry count, and stream mode. Environment configuration uses `THIRD_PARTY_CODEREVIEW_MAX_RETRIES` for its single upstream.
 - `BASE_URL` may include a gateway mount prefix, but it must not include the protocol endpoint path. The client appends `/v1/chat/completions`, `/v1/responses`, or `/v1/messages` according to `PROTOCOL`.
-- Every request uses `User-Agent: third-party-code-review-skill/1.0` without impersonating a browser.
+- `SIMULATED_CLIENT` is disabled by default, applies to streaming and non-streaming requests, preserves protocol authentication, and prepares one identity per upstream before retries. openai_chat does not currently support client simulation. Disabled profiles use `User-Agent: third-party-code-review-skill/1.0` without payload identity metadata.
 
-| Protocol | Expected wire format |
-|---|---|
-| `openai_chat` | OpenAI Chat Completions |
-| `openai_responses` | OpenAI Responses |
-| `anthropic` | Anthropic-compatible Messages gateway that accepts an upstream-defined output limit |
+| Protocol | Expected wire format | Enabled simulation |
+|---|---|---|
+| `openai_chat` | OpenAI Chat Completions | Unsupported |
+| `openai_responses` | OpenAI Responses | Codex CLI 0.144.4 |
+| `anthropic` | Anthropic-compatible Messages gateway that accepts an upstream-defined output limit | Claude Code 2.1.210 |
 
 ## Review Routing
 
