@@ -13,6 +13,11 @@
 # BASE_URL. The client appends the endpoint selected by PROTOCOL.
 # Enable streaming by default. Set STREAM to false only when the upstream
 # requires one JSON response.
+# Client simulation is disabled by default and configured per upstream.
+# openai_chat does not currently support client simulation.
+# When enabled, openai_responses simulates Codex CLI 0.144.4.
+# When enabled, anthropic simulates Claude Code 2.1.210.
+# The selected profile applies to streaming and non-streaming requests.
 
 # Plain HTTP is supported only for explicitly trusted internal relays. Keep
 # this example disabled until you explicitly accept the cleartext credential risk.
@@ -25,6 +30,7 @@ API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
 STREAM = true
+SIMULATED_CLIENT = false
 
 [UPSTREAM2]
 ENABLED = false
@@ -35,6 +41,7 @@ API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
 STREAM = true
+SIMULATED_CLIENT = false
 
 [UPSTREAM3]
 ENABLED = false
@@ -45,3 +52,4 @@ API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
 STREAM = true
+SIMULATED_CLIENT = false

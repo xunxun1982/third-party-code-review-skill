@@ -60,6 +60,69 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(CLIENT.ConfigError, "STREAM"):
             CLIENT.Config({"stream": "auto"})
 
+    def test_simulated_client_defaults_off_and_supports_protocol_profiles(self):
+        self.assertFalse(CLIENT.Config({}).simulated_client)
+        for protocol in ["openai_responses", "anthropic"]:
+            with self.subTest(protocol=protocol):
+                config = CLIENT.Config(
+                    {"protocol": protocol, "simulated_client": True}
+                )
+                self.assertTrue(config.simulated_client)
+
+    def test_simulated_client_rejects_invalid_values_and_openai_chat(self):
+        for value in [None, 0, 1, "true", [], {}]:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    CLIENT.ConfigError, "SIMULATED_CLIENT must be true or false"
+                ):
+                    CLIENT.Config(
+                        {
+                            "protocol": "openai_responses",
+                            "simulated_client": value,
+                        }
+                    )
+        with self.assertRaisesRegex(
+            CLIENT.ConfigError,
+            "openai_chat does not support simulated clients",
+        ):
+            CLIENT.Config({"protocol": "openai_chat", "simulated_client": True})
+
+    def test_runtime_and_doctor_preserve_simulated_client(self):
+        base = CLIENT.Config(
+            {"protocol": "anthropic", "simulated_client": True}
+        )
+        args = mock.Mock(
+            base_url=None,
+            protocol=None,
+            model=None,
+            timeout=None,
+            stream=None,
+        )
+
+        runtime = CLIENT._runtime_config(base, args)
+        report = CLIENT.build_doctor_report([runtime], 0, "test", [])
+
+        self.assertTrue(runtime.simulated_client)
+        self.assertTrue(report["upstreams"][0]["simulated_client"])
+
+    def test_runtime_protocol_override_keeps_simulation_validation(self):
+        base = CLIENT.Config(
+            {"protocol": "openai_responses", "simulated_client": True}
+        )
+        args = mock.Mock(
+            base_url=None,
+            protocol="openai_chat",
+            model=None,
+            timeout=None,
+            stream=None,
+        )
+
+        with self.assertRaisesRegex(
+            CLIENT.ConfigError,
+            "openai_chat does not support simulated clients",
+        ):
+            CLIENT._runtime_config(base, args)
+
     def test_fixed_upstream_sections_select_the_first_two_enabled_entries(self):
         values = {
             "upstream_disabled": {"ENABLED": False},

@@ -10,6 +10,7 @@ import http.client
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -39,6 +41,37 @@ DEFAULT_STREAM = True
 DEFAULT_MAX_RETRIES = 3
 ANTHROPIC_API_VERSION = "2023-06-01"
 USER_AGENT = "third-party-code-review-skill/1.0"
+# These pinned values are part of the externally observable client profiles.
+CODEX_VERSION = "0.144.4"
+CLAUDE_CODE_VERSION = "2.1.210"
+CODEX_USER_AGENT = (
+    f"codex-tui/{CODEX_VERSION} "
+    f"(Windows 10.0.19045; x86_64) "
+    f"WindowsTerminal (codex-tui; {CODEX_VERSION})"
+)
+CLAUDE_CODE_USER_AGENT = (
+    f"claude-cli/{CLAUDE_CODE_VERSION} (external, cli)"
+)
+CLAUDE_CODE_SYSTEM_PROMPT = (
+    "You are Claude Code, Anthropic's official CLI for Claude."
+)
+CLAUDE_CODE_BETA_TOKENS = (
+    "claude-code-20250219",
+    "interleaved-thinking-2025-05-14",
+    "redact-thinking-2026-02-12",
+    "context-management-2025-06-27",
+    "prompt-caching-scope-2026-01-05",
+    "mid-conversation-system-2026-04-07",
+    "effort-2025-11-24",
+)
+CLAUDE_CODE_BETA_HEADER = ",".join(CLAUDE_CODE_BETA_TOKENS)
+CODEX_ID_FIELDS = (
+    ("x-codex-installation-id", "installation_id"),
+    ("session_id", "session_id"),
+    ("thread_id", "thread_id"),
+    ("turn_id", "turn_id"),
+    ("x-codex-window-id", "window_id"),
+)
 MAX_ENABLED_UPSTREAMS = 2
 LOCAL_INPUT_SAFETY_CHARS = 4000000
 MAX_RESPONSE_BYTES = 10000000
@@ -69,7 +102,7 @@ ENV_TO_CONFIG = {
     MAX_RETRIES_ENV: "max_retries",
     STREAM_ENV: "stream",
 }
-SUPPORTED_CONFIG_KEYS = set(ENV_TO_CONFIG.values())
+SUPPORTED_CONFIG_KEYS = set(ENV_TO_CONFIG.values()) | {"simulated_client"}
 SUPPORTED_UPSTREAM_KEYS = SUPPORTED_CONFIG_KEYS | {"enabled"}
 
 FORBIDDEN_NAMES = {
@@ -359,6 +392,13 @@ class Config:
         if self.protocol not in SUPPORTED_PROTOCOLS:
             allowed = ", ".join(sorted(SUPPORTED_PROTOCOLS))
             raise ConfigError(f"PROTOCOL must be one of: {allowed}")
+
+        simulated_client = normalized.get("simulated_client", False)
+        if not isinstance(simulated_client, bool):
+            raise ConfigError("SIMULATED_CLIENT must be true or false")
+        if simulated_client and self.protocol == "openai_chat":
+            raise ConfigError("openai_chat does not support simulated clients")
+        self.simulated_client = simulated_client
 
         self.model = _required_text(normalized, "model", DEFAULT_MODEL)
         api_key = normalized.get("api_key", "")
@@ -842,6 +882,204 @@ def build_payload(
     )
 
 
+def _text_value(mapping: dict[str, object], key: str) -> str:
+    value = mapping.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _first_text(*values: str) -> str:
+    for value in values:
+        if value:
+            return value
+    return ""
+
+
+def _dict_field(
+    mapping: dict[str, object], key: str
+) -> dict[str, object]:
+    value = mapping.get(key)
+    if isinstance(value, dict):
+        return value
+    value = {}
+    mapping[key] = value
+    return value
+
+
+def _json_object(raw: str) -> dict[str, object] | None:
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _prepare_codex_payload(
+    payload: dict[str, object],
+) -> dict[str, object]:
+    metadata = _dict_field(payload, "client_metadata")
+    turn = _json_object(
+        _text_value(metadata, "x-codex-turn-metadata")
+    ) or {}
+
+    for metadata_key, turn_key in CODEX_ID_FIELDS:
+        identifier = _first_text(
+            _text_value(metadata, metadata_key),
+            _text_value(turn, turn_key),
+        ) or str(uuid.uuid4())
+        metadata[metadata_key] = identifier
+        turn[turn_key] = identifier
+    if not _text_value(turn, "request_kind"):
+        turn["request_kind"] = "turn"
+    turn_json = json.dumps(
+        turn,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    metadata["x-codex-turn-metadata"] = turn_json
+    return payload
+
+
+def _claude_code_identity(
+    payload: dict[str, object],
+) -> dict[str, object] | None:
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    identity = _json_object(_text_value(metadata, "user_id"))
+    if identity is None:
+        return None
+    if not _text_value(identity, "device_id"):
+        return None
+    if not _text_value(identity, "session_id"):
+        return None
+    return identity
+
+
+def _is_claude_code_system_block(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("text"), str)
+        and "Claude Code" in value["text"]
+        and "official CLI for Claude" in value["text"]
+    )
+
+
+def _prepare_claude_code_payload(
+    payload: dict[str, object],
+) -> dict[str, object]:
+    metadata = _dict_field(payload, "metadata")
+    identity = _claude_code_identity(payload)
+    if identity is None:
+        identity = {
+            "device_id": secrets.token_hex(32),
+            "account_uuid": "",
+            "session_id": str(uuid.uuid4()),
+        }
+        metadata["user_id"] = json.dumps(
+            identity,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+    identity_block = {
+        "type": "text",
+        "text": CLAUDE_CODE_SYSTEM_PROMPT,
+        "cache_control": {"type": "ephemeral"},
+    }
+    system = payload.get("system")
+    if isinstance(system, list):
+        if not any(
+            _is_claude_code_system_block(block) for block in system
+        ):
+            system.insert(0, identity_block)
+    elif isinstance(system, str):
+        system_block = {"type": "text", "text": system}
+        payload["system"] = (
+            [system_block]
+            if _is_claude_code_system_block(system_block)
+            else [identity_block, system_block]
+        )
+    else:
+        payload["system"] = [identity_block]
+    return payload
+
+
+def _prepare_simulated_client_payload(
+    payload: dict[str, object], protocol: str
+) -> dict[str, object]:
+    if protocol == "openai_responses":
+        return _prepare_codex_payload(payload)
+    if protocol == "anthropic":
+        return _prepare_claude_code_payload(payload)
+    raise ConfigError(f"{protocol} does not support simulated clients")
+
+
+def _simulated_client_headers(
+    protocol: str, payload: dict[str, object]
+) -> dict[str, str]:
+    _prepare_simulated_client_payload(payload, protocol)
+    if protocol == "openai_responses":
+        metadata = payload.get("client_metadata")
+        if not isinstance(metadata, dict):
+            raise ClientError("Codex client metadata was not prepared")
+        thread_id = _text_value(metadata, "thread_id")
+        return {
+            "Content-Type": "application/json",
+            "Accept": (
+                "text/event-stream"
+                if payload.get("stream") is True
+                else "application/json"
+            ),
+            "User-Agent": CODEX_USER_AGENT,
+            "Version": CODEX_VERSION,
+            "originator": "codex-tui",
+            "OpenAI-Beta": "responses=experimental",
+            "X-Codex-Installation-Id": _text_value(
+                metadata, "x-codex-installation-id"
+            ),
+            "Session-Id": _text_value(metadata, "session_id"),
+            "Thread-Id": thread_id,
+            "x-client-request-id": thread_id,
+            "X-Codex-Window-Id": _text_value(
+                metadata, "x-codex-window-id"
+            ),
+            "X-Codex-Turn-Metadata": _text_value(
+                metadata, "x-codex-turn-metadata"
+            ),
+        }
+    if protocol == "anthropic":
+        identity = _claude_code_identity(payload)
+        if identity is None:
+            raise ClientError(
+                "Claude Code client metadata was not prepared"
+            )
+        return {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": CLAUDE_CODE_USER_AGENT,
+            "X-App": "cli",
+            "anthropic-version": ANTHROPIC_API_VERSION,
+            "anthropic-beta": CLAUDE_CODE_BETA_HEADER,
+            "Anthropic-Dangerous-Direct-Browser-Access": "true",
+            "X-Stainless-Lang": "js",
+            "X-Stainless-Package-Version": "0.94.0",
+            "X-Stainless-OS": "Linux",
+            "X-Stainless-Arch": "arm64",
+            "X-Stainless-Runtime": "node",
+            "X-Stainless-Runtime-Version": "v24.3.0",
+            "X-Stainless-Retry-Count": "0",
+            "X-Stainless-Timeout": "600",
+            "X-Claude-Code-Session-Id": _text_value(
+                identity, "session_id"
+            ),
+        }
+    raise ConfigError(f"{protocol} does not support simulated clients")
+
+
 def _extract_tagged_reasoning(text: str) -> tuple[str, list[str]]:
     stripped = text.strip()
     for tag in ("think", "thinking"):
@@ -1125,7 +1363,13 @@ def parse_stream_response(text: str, protocol: str) -> str:
     raise ClientError("Streaming API response contains no usable text")
 
 
-def build_headers(protocol: str, api_key: str) -> dict[str, str]:
+def build_headers(
+    protocol: str,
+    api_key: str,
+    payload: dict[str, object] | None = None,
+    *,
+    simulated_client: bool = False,
+) -> dict[str, str]:
     headers = {
         "Content-Type": "application/json; charset=utf-8",
         "Accept": "application/json",
@@ -1133,12 +1377,17 @@ def build_headers(protocol: str, api_key: str) -> dict[str, str]:
     }
     if protocol in {"openai_chat", "openai_responses"}:
         headers["Authorization"] = f"Bearer {api_key}"
-        return headers
-    if protocol == "anthropic":
+    elif protocol == "anthropic":
         headers["x-api-key"] = api_key
         headers["anthropic-version"] = ANTHROPIC_API_VERSION
-        return headers
-    raise ConfigError(f"Unsupported protocol: {protocol}")
+    else:
+        raise ConfigError(f"Unsupported protocol: {protocol}")
+
+    if simulated_client:
+        if payload is None:
+            raise ClientError("Simulated client payload was not prepared")
+        headers.update(_simulated_client_headers(protocol, payload))
+    return headers
 
 
 def _set_response_timeout(response: object, seconds: float) -> None:
@@ -1187,18 +1436,29 @@ def request_review(
     timeout: int,
     api_key: str | None = None,
     protocol: str = DEFAULT_PROTOCOL,
+    *,
+    simulated_client: bool = False,
+    prepared_headers: dict[str, str] | None = None,
 ) -> str:
     raw_key = os.environ.get(API_KEY_ENV, "") if api_key is None else api_key
     key = raw_key.strip()
     if not key:
         raise ClientError(f"Missing API key; configure API_KEY or {API_KEY_ENV}")
 
+    headers = prepared_headers
+    if headers is None:
+        headers = build_headers(
+            protocol,
+            key,
+            payload,
+            simulated_client=simulated_client,
+        )
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
         url,
         data=body,
         method="POST",
-        headers=build_headers(protocol, key),
+        headers=headers,
     )
 
     deadline = time.monotonic() + timeout
@@ -1272,8 +1532,17 @@ def _request_with_retries(
     api_key: str,
     protocol: str,
     max_retries: int,
+    simulated_client: bool = False,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> str:
+    prepared_headers = None
+    if simulated_client:
+        prepared_headers = build_headers(
+            protocol,
+            api_key,
+            payload,
+            simulated_client=True,
+        )
     for retry_index in range(max_retries + 1):
         try:
             return requester(
@@ -1282,6 +1551,8 @@ def _request_with_retries(
                 timeout,
                 api_key=api_key,
                 protocol=protocol,
+                simulated_client=simulated_client,
+                prepared_headers=prepared_headers,
             )
         except (RetryableClientError, TimeoutError, OSError) as exc:
             if retry_index >= max_retries:
@@ -1325,6 +1596,7 @@ def review_upstreams(
                     api_key=config.api_key,
                     protocol=config.protocol,
                     max_retries=config.max_retries,
+                    simulated_client=config.simulated_client,
                     sleeper=sleeper,
                 )
             )
@@ -1372,6 +1644,7 @@ def build_doctor_report(
                 "api_key_present": bool(config.api_key),
                 "max_retries": config.max_retries,
                 "stream": config.stream,
+                "simulated_client": config.simulated_client,
             }
             for config in configs
         ],
@@ -1423,6 +1696,7 @@ def _runtime_config(base: Config, args: argparse.Namespace) -> Config:
             ),
             "max_retries": base.max_retries,
             "stream": args.stream if args.stream is not None else base.stream,
+            "simulated_client": base.simulated_client,
         }
     )
 

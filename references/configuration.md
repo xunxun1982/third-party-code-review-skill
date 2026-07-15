@@ -26,6 +26,8 @@ TOML files may contain tables named `UPSTREAM<number>` or `UPSTREAM_<name>`. Ena
 
 Each enabled table is independent and may use a different protocol, model, service root URL or gateway mount prefix, API key, timeout, retry count, and streaming mode. Each selected upstream has an independent retry counter; one may finish without retrying while another uses all configured retries. The client waits for both before combining results. One failed upstream is reported beside a successful result from the other. The process returns failure only when every selected upstream fails.
 
+Each table may independently select the documented client identity profile; endpoint selection, authentication, retry policy, and response parsing continue to follow the upstream protocol. See [Client Simulation](#client-simulation) for the profile matrix.
+
 ```toml
 [UPSTREAM_codereview]
 ENABLED = true
@@ -36,6 +38,7 @@ API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
 STREAM = true
+SIMULATED_CLIENT = false
 
 [UPSTREAM2]
 ENABLED = true
@@ -46,6 +49,7 @@ API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
 STREAM = true
+SIMULATED_CLIENT = false
 
 [UPSTREAM3]
 ENABLED = false
@@ -56,6 +60,7 @@ API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
 STREAM = true
+SIMULATED_CLIENT = false
 ```
 
 Every enabled table must explicitly contain `PROTOCOL`, `BASE_URL`, `MODEL`, and `API_KEY`. Disabled tables may remain incomplete, but their key names and `ENABLED` type are still validated. Top-level scalar settings cannot be mixed with upstream tables.
@@ -72,6 +77,7 @@ Every enabled table must explicitly contain `PROTOCOL`, `BASE_URL`, `MODEL`, and
 | `TIMEOUT_SECONDS` | `600`; positive per-upstream total response deadline. Concurrent requests make total wait approximate the slowest selected upstream rather than the sum. |
 | `MAX_RETRIES` | `3`; integer from `0` through `10`. This is the number of retries after the initial request, so the default permits up to four attempts per upstream. Each upstream counts independently. |
 | `STREAM` | `true`; requests SSE by default. Set `false` for one JSON response. |
+| `SIMULATED_CLIENT` | `false`; boolean. Enables the profile fixed for the selected protocol. `openai_chat` with `true` is a configuration error. |
 
 `BASE_URL` may include a gateway mount prefix such as `/proxy/codereview_chat`, but it must not include the protocol endpoint path. The client removes a trailing slash from the configured path and appends `/v1/chat/completions` for `openai_chat`, `/v1/responses` for `openai_responses`, or `/v1/messages` for `anthropic`. A configured query is preserved on the resolved request URL. Existing values that already contain an endpoint are not detected or trimmed automatically and would produce a duplicated path.
 
@@ -91,11 +97,13 @@ Environment variables configure one upstream only. Use fixed TOML tables for con
 
 `THIRD_PARTY_CODEREVIEW_CONFIG` selects a lowest-priority fallback TOML file and is not a TOML key.
 
+`SIMULATED_CLIENT` has no environment-variable or command-line override. Configure it in each TOML upstream table so the opt-in remains explicit and local to that upstream.
+
 Command-line options that override a request URL, protocol, or model require exactly one enabled upstream. `--timeout`, `--stream`, and `--no-stream` may override common settings for every selected upstream. Retry count has no command-line override; configure `MAX_RETRIES` in the selected source.
 
 ## Doctor
 
-Run `python scripts/codereview_client.py doctor` to inspect the effective configuration. The command reports `active_config_source`, candidate config files and their `exists` flags, environment variables as present or absent, selected and ignored upstream counts, and redacted upstream summaries including both configured `base_url`, resolved `request_url`, and `max_retries`. API-key values are never emitted, and URL user information, query strings, and fragments are removed from displayed URLs. The command validates configuration but does not perform a network request.
+Run `python scripts/codereview_client.py doctor` to inspect the effective configuration. The command reports `active_config_source`, candidate config files and their `exists` flags, environment variables as present or absent, selected and ignored upstream counts, and redacted upstream summaries including configured `base_url`, resolved `request_url`, `max_retries`, and `"simulated_client"`. API-key values are never emitted, and URL user information, query strings, and fragments are removed from displayed URLs. The command validates configuration but does not perform a network request.
 
 ## Protocol Selection
 
@@ -105,6 +113,36 @@ Run `python scripts/codereview_client.py doctor` to inspect the effective config
 | `openai_responses` | `model`, `instructions`, `input`, `store: false`, optional `stream` | JSON output text or Responses SSE deltas | `Authorization: Bearer ...` |
 | `anthropic` | Anthropic-compatible Messages: `model`, top-level `system`, `messages`, optional `stream` | JSON text blocks or Anthropic SSE text deltas | `x-api-key` and a client-defined `anthropic-version` header |
 
+## Client Simulation
+
+`SIMULATED_CLIENT` is disabled by default. openai_chat does not currently support client simulation and fails during configuration when the switch is `true`.
+
+| Protocol | Disabled profile | Enabled profile |
+|---|---|---|
+| `openai_chat` | Generic `third-party-code-review-skill/1.0` client | Unsupported |
+| `openai_responses` | Generic client | Codex CLI 0.144.4 |
+| `anthropic` | Generic client | Claude Code 2.1.210 |
+
+The selected profile applies to streaming and non-streaming requests. It preserves the configured URL, request mode, retry policy, and authentication method. Simulation adds no `max_tokens`, output-length, temperature, or `tools` field.
+
+### Codex CLI profile
+
+- Sets `User-Agent: codex-tui/0.144.4 (Windows 10.0.19045; x86_64) WindowsTerminal (codex-tui; 0.144.4)`, `Version: 0.144.4`, `originator: codex-tui`, and `OpenAI-Beta: responses=experimental`.
+- Sets `Content-Type: application/json`. `Accept` is `text/event-stream` for streaming requests and `application/json` for non-streaming requests.
+- Generates installation, session, thread, turn, and window UUIDs. It exposes the matching values through `X-Codex-Installation-Id`, `Session-Id`, `Thread-Id`, `x-client-request-id`, `X-Codex-Window-Id`, and `X-Codex-Turn-Metadata`.
+- Adds matching `client_metadata` to the Responses payload. The serialized turn metadata includes the same identifiers and `request_kind: turn`.
+- Keeps `Authorization: Bearer ...` authentication. One upstream review reuses the same prepared identity and payload across retries.
+
+### Claude Code profile
+
+- Sets `User-Agent: claude-cli/2.1.210 (external, cli)`, `X-App: cli`, `anthropic-version: 2023-06-01`, `Accept: application/json`, and `Content-Type: application/json`.
+- Sets `anthropic-beta` to `claude-code-20250219`, `interleaved-thinking-2025-05-14`, `redact-thinking-2026-02-12`, `context-management-2025-06-27`, `prompt-caching-scope-2026-01-05`, `mid-conversation-system-2026-04-07`, and `effort-2025-11-24`.
+- Sets `Anthropic-Dangerous-Direct-Browser-Access: true` and the Stainless identity: JavaScript, package `0.94.0`, Linux, arm64, Node `v24.3.0`, retry count `0`, and timeout `600`.
+- Generates a stable session UUID for `X-Claude-Code-Session-Id` and JSON-string `metadata.user_id`. The payload identity also contains a random 64-character hexadecimal `device_id` and an empty `account_uuid`.
+- Prepends an ephemeral system block identifying Claude Code before the existing review policy, while keeping `x-api-key` authentication unchanged.
+
+The normal retry path prepares the payload and header set in place once before its first attempt, then reuses both. It does not deep-copy the payload, duplicate large attachment strings, cache serialized request bodies, or retain global session state. With the switch disabled, profile parsing and random identity generation are skipped.
+
 When `STREAM` is omitted, the client sends `stream: true`. Set `STREAM = false` or use `--no-stream` for one JSON response. The client still parses the actual response as SSE or JSON without a second request.
 
 Visible reasoning is parsed without adding request parameters. `openai_chat` accepts `reasoning`, `reasoning_content`, or `thinking` message and delta fields; `openai_responses` accepts reasoning summary items and reasoning summary/text delta events; `anthropic` accepts `thinking` blocks and `thinking_delta`. A single complete leading `<think>` or `<thinking>` wrapper is separated as reasoning even when no review text follows it; literal tags elsewhere remain review text. Signatures and encrypted thinking metadata are ignored.
@@ -113,7 +151,7 @@ When reasoning exists, output places `{Upstream reasoning or summary (<protocol>
 
 Each upstream may make up to `1 + MAX_RETRIES` stateless attempts. Retryable failures are transport errors, timeouts, HTTP 408/429/5xx, invalid UTF-8, invalid JSON/SSE, and responses with no usable text. Redirects, other 4xx responses, configuration errors, and local input errors fail immediately. Retry waits are 1, 2, and 4 seconds, then remain capped at 8 seconds. With two upstreams at the default, the maximum is eight external attempts in total, but the counters and completion timing remain independent.
 
-Every request sends `User-Agent: third-party-code-review-skill/1.0`. This identifies the client without impersonating a browser.
+Requests use `User-Agent: third-party-code-review-skill/1.0` unless a supported upstream explicitly enables the profile above.
 
 The client does not send model context or output-length parameters for any protocol. Upstream defaults and limits therefore govern both. Raw response capture accepts up to and including `10000000` bytes per upstream attempt and rejects the next byte for resource safety. `anthropic` targets Anthropic-compatible Messages gateways that accept omitted `max_tokens`; it does not claim direct compatibility with the official Anthropic endpoint, where `max_tokens` is normally required. The `anthropic-version` header uses a client-internal compatibility value and is not configurable.
 
