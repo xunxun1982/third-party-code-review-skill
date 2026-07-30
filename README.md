@@ -44,10 +44,13 @@ API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
 STREAM = true
+RETURN_REASONING = true
 SIMULATED_CLIENT = false
 ```
 
-Enabled tables are evaluated in declaration order. The client sends the same screened scope to the first two enabled upstreams concurrently, ignores later enabled tables with a warning, and combines responses under `Upstream 1` and `Upstream 2` headings. Each selected table may use a different protocol, model, URL, timeout, API key, retry count, and streaming mode. Each upstream has an independent retry counter: one may succeed without retrying while the other uses its configured retries. The client waits for both before combining results. One failed upstream does not discard a successful result from the other; the command fails only when every selected upstream fails.
+Enabled tables are evaluated in declaration order. The client sends the same screened scope to the first two enabled upstreams concurrently, ignores later enabled tables with a warning, and combines responses under `Upstream 1` and `Upstream 2` headings. Each selected table may use a different protocol, model, URL, timeout, API key, retry count, streaming mode, and reasoning-output mode. Each upstream has an independent retry counter: one may succeed without retrying while the other uses its configured retries. The client waits for both before combining results. One failed upstream does not discard a successful result from the other; the command fails only when every selected upstream fails.
+
+`RETURN_REASONING` is a per-upstream TOML boolean and defaults to `true` for compatibility. It controls only whether visible reasoning or summary fields are included in local output; it does not add a reasoning request field or change model generation. Set it to `false` to return only review text. A reasoning-only response then returns `[No review text returned]` without retrying. There is no environment-variable or command-line override.
 
 `SIMULATED_CLIENT` is a per-upstream TOML boolean and is disabled by default. There is no environment-variable or command-line override. openai_chat does not currently support client simulation and fails configuration when the switch is `true`. An enabled profile is prepared once per upstream and reused across retries for streaming and non-streaming requests.
 
@@ -103,7 +106,7 @@ Set each upstream table's `PROTOCOL` to exactly one of these values:
 
 `BASE_URL` is the service root URL or a gateway mount prefix. It may include a path such as `/proxy/codereview_chat`, but it must not include the protocol endpoint path. The client appends `/v1/chat/completions`, `/v1/responses`, or `/v1/messages` according to `PROTOCOL`. A configured query is preserved on the final request URL.
 
-The client also preserves visible upstream reasoning or summary data when the selected protocol returns it. It does not add a reasoning request parameter. When reasoning is present, the output is:
+When `RETURN_REASONING = true`, the client preserves visible upstream reasoning or summary data returned by the selected protocol. It does not add a reasoning request parameter. When reasoning is present, the output is:
 
 ```text
 {Upstream reasoning or summary (<protocol>):
@@ -114,7 +117,7 @@ Review result:
 <review text>
 ```
 
-Without reasoning, the existing plain review text is returned. Reasoning-only output is successful and uses `Review result: [No review text returned]` so upstream withdrawals or omitted final answers remain visible.
+Without reasoning, or with `RETURN_REASONING = false`, the plain review text is returned. Reasoning-only output is successful and uses `[No review text returned]`; when reasoning output is enabled, that placeholder appears under `Review result` so upstream withdrawals or omitted final answers remain visible.
 
 For a gateway that exposes the complete route as its base, use:
 
@@ -140,6 +143,7 @@ API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
 STREAM = true
+RETURN_REASONING = true
 SIMULATED_CLIENT = false
 ```
 
@@ -173,6 +177,7 @@ API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
 STREAM = true
+RETURN_REASONING = true
 SIMULATED_CLIENT = false
 ```
 
@@ -205,6 +210,7 @@ API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
 STREAM = true
+RETURN_REASONING = true
 SIMULATED_CLIENT = false
 ```
 
@@ -240,7 +246,7 @@ Inspect the effective configuration without sending a request:
 python scripts/codereview_client.py doctor
 ```
 
-The redacted JSON reports `active_config_source`, candidate config files with `exists` flags, environment variables as present or absent, enabled and ignored upstream counts, and each selected upstream's protocol, model, sanitized `base_url`, resolved `request_url`, key-presence flag, `max_retries`, stream mode, and `simulated_client` state. It never prints API-key values, removes URL user information, query strings, and fragments, and does not perform a network request.
+The redacted JSON reports `active_config_source`, candidate config files with `exists` flags, environment variables as present or absent, enabled and ignored upstream counts, and each selected upstream's protocol, model, sanitized `base_url`, resolved `request_url`, key-presence flag, `max_retries`, stream mode, `return_reasoning` mode, and `simulated_client` state. It never prints API-key values, removes URL user information, query strings, and fragments, and does not perform a network request.
 
 Review selected files:
 
@@ -303,7 +309,7 @@ python scripts/codereview_client.py --question "Review this change" --stream
 python scripts/codereview_client.py --question "Review this change" --no-stream
 ```
 
-With neither flag and no `STREAM` setting, the request uses streaming. The client parses either JSON or SSE based on the actual response.
+With neither flag and no `STREAM` setting, the request uses streaming. The client parses either JSON or SSE based on the actual response. For SSE, it returns as soon as the standard terminal signal is complete: `[DONE]` for OpenAI Chat, `response.completed` for OpenAI Responses, or `message_stop` for Anthropic. If a compatible stream omits its terminal signal, the existing EOF and total-deadline behavior remains in force.
 
 ## Security Model
 
@@ -349,7 +355,7 @@ Trusted configured endpoints may use plain HTTP, including internal relays and d
 
 OpenAI Responses requests include `store: false`. Storage and training policies of custom proxies remain server-side concerns and must be verified with the service operator.
 
-Redirects are refused so API credentials remain on the exact configured endpoint. `TIMEOUT_SECONDS` is enforced separately for every attempt as a monotonic total response deadline, and response capture accepts at most `10000000` bytes. Transport failures, timeouts, HTTP 408/429/5xx, invalid UTF-8, invalid JSON/SSE, and responses with no usable text are retryable. Redirects, other 4xx responses, configuration errors, and local input errors are not retried.
+Redirects are refused so API credentials remain on the exact configured endpoint. `TIMEOUT_SECONDS` is enforced separately for every attempt as a monotonic total response deadline, and response capture accepts at most `10000000` bytes. A complete protocol terminal SSE event ends capture without waiting for the server to close the HTTP connection. Transport failures, timeouts, HTTP 408/429/5xx, invalid UTF-8, invalid JSON/SSE, and responses with no usable text are retryable. Redirects, other 4xx responses, configuration errors, and local input errors are not retried.
 
 ### Untrusted response
 

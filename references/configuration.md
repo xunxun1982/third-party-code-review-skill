@@ -24,7 +24,7 @@ An active file with an empty `API_KEY` does not borrow a key from environment va
 
 TOML files may contain tables named `UPSTREAM<number>` or `UPSTREAM_<name>`. Enabled tables are evaluated in declaration order. The client sends to the first two enabled upstreams concurrently, ignores later enabled tables with a warning, and combines responses under `Upstream 1` and `Upstream 2` headings.
 
-Each enabled table is independent and may use a different protocol, model, service root URL or gateway mount prefix, API key, timeout, retry count, and streaming mode. Each selected upstream has an independent retry counter; one may finish without retrying while another uses all configured retries. The client waits for both before combining results. One failed upstream is reported beside a successful result from the other. The process returns failure only when every selected upstream fails.
+Each enabled table is independent and may use a different protocol, model, service root URL or gateway mount prefix, API key, timeout, retry count, streaming mode, and reasoning-output mode. Each selected upstream has an independent retry counter; one may finish without retrying while another uses all configured retries. The client waits for both before combining results. One failed upstream is reported beside a successful result from the other. The process returns failure only when every selected upstream fails.
 
 Each table may independently select the documented client identity profile; endpoint selection, authentication, retry policy, and response parsing continue to follow the upstream protocol. See [Client Simulation](#client-simulation) for the profile matrix.
 
@@ -38,6 +38,7 @@ API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
 STREAM = true
+RETURN_REASONING = true
 SIMULATED_CLIENT = false
 
 [UPSTREAM2]
@@ -49,6 +50,7 @@ API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
 STREAM = true
+RETURN_REASONING = true
 SIMULATED_CLIENT = false
 
 [UPSTREAM3]
@@ -60,6 +62,7 @@ API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
 STREAM = true
+RETURN_REASONING = true
 SIMULATED_CLIENT = false
 ```
 
@@ -77,6 +80,7 @@ Every enabled table must explicitly contain `PROTOCOL`, `BASE_URL`, `MODEL`, and
 | `TIMEOUT_SECONDS` | `600`; positive per-upstream total response deadline. Concurrent requests make total wait approximate the slowest selected upstream rather than the sum. |
 | `MAX_RETRIES` | `3`; integer from `0` through `10`. This is the number of retries after the initial request, so the default permits up to four attempts per upstream. Each upstream counts independently. |
 | `STREAM` | `true`; requests SSE by default. Set `false` for one JSON response. |
+| `RETURN_REASONING` | `true`; boolean. Controls whether visible upstream reasoning or summaries are included in local output. It does not request reasoning or change the upstream payload. |
 | `SIMULATED_CLIENT` | `false`; boolean. Enables the profile fixed for the selected protocol. `openai_chat` with `true` is a configuration error. |
 
 `BASE_URL` may include a gateway mount prefix such as `/proxy/codereview_chat`, but it must not include the protocol endpoint path. The client removes a trailing slash from the configured path and appends `/v1/chat/completions` for `openai_chat`, `/v1/responses` for `openai_responses`, or `/v1/messages` for `anthropic`. A configured query is preserved on the resolved request URL. Existing values that already contain an endpoint are not detected or trimmed automatically and would produce a duplicated path.
@@ -97,13 +101,13 @@ Environment variables configure one upstream only. Use fixed TOML tables for con
 
 `THIRD_PARTY_CODEREVIEW_CONFIG` selects a lowest-priority fallback TOML file and is not a TOML key.
 
-`SIMULATED_CLIENT` has no environment-variable or command-line override. Configure it in each TOML upstream table so the opt-in remains explicit and local to that upstream.
+`RETURN_REASONING` and `SIMULATED_CLIENT` have no environment-variable or command-line override. Configure them in each TOML upstream table so each behavior remains explicit and local to that upstream.
 
 Command-line options that override a request URL, protocol, or model require exactly one enabled upstream. `--timeout`, `--stream`, and `--no-stream` may override common settings for every selected upstream. Retry count has no command-line override; configure `MAX_RETRIES` in the selected source.
 
 ## Doctor
 
-Run `python scripts/codereview_client.py doctor` to inspect the effective configuration. The command reports `active_config_source`, candidate config files and their `exists` flags, environment variables as present or absent, selected and ignored upstream counts, and redacted upstream summaries including configured `base_url`, resolved `request_url`, `max_retries`, and `"simulated_client"`. API-key values are never emitted, and URL user information, query strings, and fragments are removed from displayed URLs. The command validates configuration but does not perform a network request.
+Run `python scripts/codereview_client.py doctor` to inspect the effective configuration. The command reports `active_config_source`, candidate config files and their `exists` flags, environment variables as present or absent, selected and ignored upstream counts, and redacted upstream summaries including configured `base_url`, resolved `request_url`, `max_retries`, `"return_reasoning"`, and `"simulated_client"`. API-key values are never emitted, and URL user information, query strings, and fragments are removed from displayed URLs. The command validates configuration but does not perform a network request.
 
 ## Protocol Selection
 
@@ -143,11 +147,11 @@ The selected profile applies to streaming and non-streaming requests. It preserv
 
 The normal retry path prepares the payload and header set in place once before its first attempt, then reuses both. It does not deep-copy the payload, duplicate large attachment strings, cache serialized request bodies, or retain global session state. With the switch disabled, profile parsing and random identity generation are skipped.
 
-When `STREAM` is omitted, the client sends `stream: true`. Set `STREAM = false` or use `--no-stream` for one JSON response. The client still parses the actual response as SSE or JSON without a second request.
+When `STREAM` is omitted, the client sends `stream: true`. Set `STREAM = false` or use `--no-stream` for one JSON response. The client still parses the actual response as SSE or JSON without a second request. SSE capture stops at the matching complete terminal signal: `[DONE]` for `openai_chat`, `response.completed` for `openai_responses`, and `message_stop` for `anthropic`. A stream without a recognized terminal signal continues until HTTP EOF or the configured total deadline.
 
-Visible reasoning is parsed without adding request parameters. `openai_chat` accepts `reasoning`, `reasoning_content`, or `thinking` message and delta fields; `openai_responses` accepts reasoning summary items and reasoning summary/text delta events; `anthropic` accepts `thinking` blocks and `thinking_delta`. A single complete leading `<think>` or `<thinking>` wrapper is separated as reasoning even when no review text follows it; literal tags elsewhere remain review text. Signatures and encrypted thinking metadata are ignored.
+Visible reasoning is parsed without adding request parameters. `openai_chat` accepts `reasoning`, `reasoning_content`, or `thinking` message and delta fields; `openai_responses` accepts reasoning summary items and reasoning summary/text delta events; `anthropic` accepts `thinking` blocks and `thinking_delta`. A single complete leading `<think>` or `<thinking>` wrapper is separated as reasoning even when no review text follows it; literal tags elsewhere remain review text. Signatures and encrypted thinking metadata are ignored. `RETURN_REASONING = false` suppresses the parsed reasoning only in local output; it does not alter the request payload or model behavior.
 
-When reasoning exists, output places `{Upstream reasoning or summary (<protocol>): ...}` before `Review result`. Without reasoning, output remains the plain review text. Reasoning-only output is valid and marks the body `[No review text returned]`; only a response containing neither reasoning nor review text is empty and retryable.
+When reasoning exists and `RETURN_REASONING = true`, output places `{Upstream reasoning or summary (<protocol>): ...}` before `Review result`. Without returned reasoning, output remains the plain review text. Reasoning-only output is valid and marks the body `[No review text returned]`; only a response containing neither reasoning nor review text is empty and retryable.
 
 Each upstream may make up to `1 + MAX_RETRIES` stateless attempts. Retryable failures are transport errors, timeouts, HTTP 408/429/5xx, invalid UTF-8, invalid JSON/SSE, and responses with no usable text. Redirects, other 4xx responses, configuration errors, and local input errors fail immediately. Retry waits are 1, 2, and 4 seconds, then remain capped at 8 seconds. With two upstreams at the default, the maximum is eight external attempts in total, but the counters and completion timing remain independent.
 
@@ -169,7 +173,7 @@ Any future tool support requires a separate opt-in design with a per-tool allowl
 - Redirects are refused so authentication headers remain on the configured endpoint.
 - Git diff collection uses NUL-delimited path inspection, rejects blocked paths, and disables rename detection, external diff drivers, and text conversion.
 - Files, Git output, and API responses are read in bounded chunks. Oversized input is rejected during capture instead of after an unbounded read.
-- The configured HTTP timeout is tracked with a monotonic total deadline while the response body is read; responses of at most `10000000` bytes are accepted.
+- The configured HTTP timeout is tracked with a monotonic total deadline while the response body is read; responses of at most `10000000` bytes are accepted. A recognized protocol terminal SSE event ends capture without waiting for HTTP EOF.
 - Successful and error responses have terminal control characters removed and common secret-like values redacted before output.
 - Characters unsupported by the active console encoding are emitted as backslash escapes so arbitrary upstream Unicode cannot terminate local output.
 - Plain HTTP is allowed for trusted configured endpoints, including internal relays and domains that local DNS or Clash resolves to internal addresses. The client does not block by resolved IP and warns for each plain-HTTP upstream.
@@ -178,8 +182,11 @@ Any future tool support requires a separate opt-in design with a per-tool allowl
 ## Protocol References
 
 - OpenAI Chat Completions: <https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create>
+- OpenAI Chat streaming events: <https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events>
 - OpenAI Responses migration and response shape: <https://developers.openai.com/api/docs/guides/migrate-to-responses>
+- OpenAI Responses streaming: <https://developers.openai.com/api/docs/guides/streaming-responses>
 - Anthropic Messages schema reference (`max_tokens` is required by the official endpoint): <https://platform.claude.com/docs/en/api/messages/create>
+- Anthropic Messages streaming: <https://platform.claude.com/docs/en/build-with-claude/streaming>
 - OpenAI Python `base_url`: <https://github.com/openai/openai-python/blob/main/src/openai/_client.py>
 - Anthropic Python `base_url`: <https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/_client.py>
 - Least-privilege tool guidance: <https://cheatsheetseries.owasp.org/cheatsheets/AI_Agent_Security_Cheat_Sheet.html>

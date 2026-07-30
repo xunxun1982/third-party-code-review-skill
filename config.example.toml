@@ -7,12 +7,14 @@
 # first two enabled upstreams concurrently and ignores later enabled tables.
 # Each upstream may use a different protocol, model, service base URL or gateway
 # mount prefix,
-# timeout, and stream mode. Model context and output limits follow the upstream;
+# timeout, stream mode, and reasoning output mode. Model context and output limits follow the upstream;
 # raw response capture accepts at most 10000000 bytes per attempt.
 # Do not include /v1/chat/completions, /v1/responses, or /v1/messages in
 # BASE_URL. The client appends the endpoint selected by PROTOCOL.
 # Enable streaming by default. Set STREAM to false only when the upstream
 # requires one JSON response.
+# RETURN_REASONING controls only local output and does not add a reasoning
+# request field to the upstream payload.
 # Client simulation is disabled by default and configured per upstream.
 # openai_chat does not currently support client simulation.
 # When enabled, openai_responses simulates Codex CLI 0.144.4.
@@ -30,6 +32,7 @@ API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
 STREAM = true
+RETURN_REASONING = true
 SIMULATED_CLIENT = false
 
 [UPSTREAM2]
@@ -41,6 +44,7 @@ API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
 STREAM = true
+RETURN_REASONING = true
 SIMULATED_CLIENT = false
 
 [UPSTREAM3]
@@ -52,4 +56,5 @@ API_KEY = ""
 TIMEOUT_SECONDS = 600
 MAX_RETRIES = 3
 STREAM = true
+RETURN_REASONING = true
 SIMULATED_CLIENT = false

@@ -38,6 +38,7 @@ DEFAULT_PROTOCOL = "openai_chat"
 DEFAULT_MODEL = "codereview"
 DEFAULT_TIMEOUT_SECONDS = 600
 DEFAULT_STREAM = True
+DEFAULT_RETURN_REASONING = True
 DEFAULT_MAX_RETRIES = 3
 ANTHROPIC_API_VERSION = "2023-06-01"
 USER_AGENT = "third-party-code-review-skill/1.0"
@@ -76,12 +77,20 @@ MAX_ENABLED_UPSTREAMS = 2
 LOCAL_INPUT_SAFETY_CHARS = 4000000
 MAX_RESPONSE_BYTES = 10000000
 READ_CHUNK_BYTES = 65536
+SSE_TERMINAL_DATA_BYTES = READ_CHUNK_BYTES
 SUPPORTED_PROTOCOLS = {"openai_chat", "openai_responses", "anthropic"}
 PROTOCOL_PATHS = {
     "openai_chat": "/v1/chat/completions",
     "openai_responses": "/v1/responses",
     "anthropic": "/v1/messages",
 }
+SSE_TERMINAL_EVENT_TYPES = {
+    "openai_responses": b"response.completed",
+    "anthropic": b"message_stop",
+}
+SSE_JSON_TYPE_PREFIX_RE = re.compile(
+    rb'^\s*\{\s*"type"\s*:\s*"(?P<type>[A-Za-z0-9._-]+)"(?=\s*[,}])'
+)
 UPSTREAM_SECTION_RE = re.compile(r"^upstream(?:[0-9]+|_[a-z0-9_-]+)$", re.IGNORECASE)
 
 API_KEY_ENV = "THIRD_PARTY_CODEREVIEW_API_KEY"
@@ -102,7 +111,10 @@ ENV_TO_CONFIG = {
     MAX_RETRIES_ENV: "max_retries",
     STREAM_ENV: "stream",
 }
-SUPPORTED_CONFIG_KEYS = set(ENV_TO_CONFIG.values()) | {"simulated_client"}
+SUPPORTED_CONFIG_KEYS = set(ENV_TO_CONFIG.values()) | {
+    "return_reasoning",
+    "simulated_client",
+}
 SUPPORTED_UPSTREAM_KEYS = SUPPORTED_CONFIG_KEYS | {"enabled"}
 
 FORBIDDEN_NAMES = {
@@ -364,6 +376,13 @@ def _stream_mode(values: dict[str, Any]) -> bool | None:
     raise ConfigError("STREAM must be true or false")
 
 
+def _return_reasoning_mode(values: dict[str, Any]) -> bool:
+    raw = values.get("return_reasoning", DEFAULT_RETURN_REASONING)
+    if type(raw) is not bool:
+        raise ConfigError("RETURN_REASONING must be true or false")
+    return raw
+
+
 class Config:
     def __init__(self, values: dict[str, Any]):
         normalized = _lower_keys(values)
@@ -410,6 +429,7 @@ class Config:
         )
         self.max_retries = _bounded_retry_count(normalized)
         self.stream = _stream_mode(normalized)
+        self.return_reasoning = _return_reasoning_mode(normalized)
 
 
 def select_upstream_configs(values: dict[str, Any]) -> tuple[list[Config], int]:
@@ -1107,6 +1127,8 @@ def _format_review_response(
     protocol: str,
     text_parts: list[str],
     reasoning_parts: list[str],
+    *,
+    return_reasoning: bool = True,
 ) -> str:
     reviews: list[str] = []
     for part in text_parts:
@@ -1120,7 +1142,7 @@ def _format_review_response(
         raise ClientError("API response contains no usable text")
 
     review_text = "\n".join(reviews) if reviews else "[No review text returned]"
-    if not reasoning_text:
+    if not reasoning_text or not return_reasoning:
         return review_text
     return (
         f"{{Upstream reasoning or summary ({protocol}):\n{reasoning_text}\n}}"
@@ -1217,12 +1239,27 @@ def _parse_response_parts(
     return text_parts, reasoning_parts
 
 
-def parse_response(response: object, protocol: str = DEFAULT_PROTOCOL) -> str:
+def parse_response(
+    response: object,
+    protocol: str = DEFAULT_PROTOCOL,
+    *,
+    return_reasoning: bool = True,
+) -> str:
     text_parts, reasoning_parts = _parse_response_parts(response, protocol)
-    return _format_review_response(protocol, text_parts, reasoning_parts)
+    return _format_review_response(
+        protocol,
+        text_parts,
+        reasoning_parts,
+        return_reasoning=return_reasoning,
+    )
 
 
-def parse_stream_response(text: str, protocol: str) -> str:
+def parse_stream_response(
+    text: str,
+    protocol: str,
+    *,
+    return_reasoning: bool = True,
+) -> str:
     deltas: list[str] = []
     reasoning_deltas: list[str] = []
     completed_reasoning: list[str] = []
@@ -1337,6 +1374,7 @@ def parse_stream_response(text: str, protocol: str) -> str:
             protocol,
             ["".join(deltas)],
             completed_reasoning or ["".join(reasoning_deltas)],
+            return_reasoning=return_reasoning,
         )
 
     for event in reversed(fallback_objects):
@@ -1353,12 +1391,16 @@ def parse_stream_response(text: str, protocol: str) -> str:
                     protocol,
                     text_parts,
                     final_reasoning or ["".join(reasoning_deltas)],
+                    return_reasoning=return_reasoning,
                 )
             except ClientError:
                 continue
     if reasoning_deltas:
         return _format_review_response(
-            protocol, [], ["".join(reasoning_deltas)]
+            protocol,
+            [],
+            ["".join(reasoning_deltas)],
+            return_reasoning=return_reasoning,
         )
     raise ClientError("Streaming API response contains no usable text")
 
@@ -1399,19 +1441,113 @@ def _set_response_timeout(response: object, seconds: float) -> None:
         setter(max(seconds, 0.001))
 
 
+class _SSETerminalDetector:
+    def __init__(self, protocol: str):
+        self.protocol = protocol
+        self._cursor = 0
+        self._search_cursor = 0
+        self._event_name = b""
+        self._data = bytearray()
+        self._has_data_line = False
+        self._data_too_large = False
+
+    def _reset_event(self) -> None:
+        self._event_name = b""
+        self._data.clear()
+        self._has_data_line = False
+        self._data_too_large = False
+
+    def _append_data(self, body: bytearray, start: int, end: int) -> None:
+        if self._has_data_line and len(self._data) < SSE_TERMINAL_DATA_BYTES:
+            self._data.append(ord("\n"))
+        self._has_data_line = True
+        remaining = SSE_TERMINAL_DATA_BYTES - len(self._data)
+        copied = min(max(remaining, 0), end - start)
+        if copied:
+            self._data.extend(memoryview(body)[start : start + copied])
+        if copied < end - start:
+            self._data_too_large = True
+
+    def _data_is_terminal(self) -> bool:
+        data = bytes(self._data)
+        if self.protocol in {"openai_chat", "openai_responses"}:
+            if data == b"[DONE]":
+                return True
+
+        terminal_type = SSE_TERMINAL_EVENT_TYPES.get(self.protocol)
+        if terminal_type is None or terminal_type not in data:
+            return False
+        if self._data_too_large:
+            match = SSE_JSON_TYPE_PREFIX_RE.match(data)
+            return bool(match and match.group("type") == terminal_type)
+        try:
+            event = json.loads(data)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        return isinstance(event, dict) and event.get("type") == terminal_type.decode()
+
+    def _event_is_terminal(self, body: bytearray) -> bool:
+        terminal_type = SSE_TERMINAL_EVENT_TYPES.get(self.protocol)
+        if terminal_type is not None and self._event_name == terminal_type:
+            return True
+        return self._data_is_terminal()
+
+    def _process_line(self, body: bytearray, start: int, end: int) -> bool:
+        if end > start and body[end - 1] == ord("\r"):
+            end -= 1
+        if start == end:
+            terminal = self._event_is_terminal(body)
+            self._reset_event()
+            return terminal
+        if body[start] == ord(":"):
+            return False
+
+        separator = body.find(b":", start, end)
+        field_end = end if separator < 0 else separator
+        value_start = end if separator < 0 else separator + 1
+        if value_start < end and body[value_start] == ord(" "):
+            value_start += 1
+        field_size = field_end - start
+        if field_size == 5 and body[start:field_end] == b"event":
+            value_size = end - value_start
+            self._event_name = (
+                bytes(body[value_start:end]) if value_size <= 128 else b""
+            )
+        elif field_size == 4 and body[start:field_end] == b"data":
+            self._append_data(body, value_start, end)
+        return False
+
+    def feed(self, body: bytearray) -> int | None:
+        """Return the absolute byte offset after a complete terminal SSE event."""
+
+        while True:
+            line_end = body.find(b"\n", self._search_cursor)
+            if line_end < 0:
+                self._search_cursor = len(body)
+                return None
+            line_start = self._cursor
+            self._cursor = line_end + 1
+            self._search_cursor = self._cursor
+            if self._process_line(body, line_start, line_end):
+                return self._cursor
+
+
 def _read_response_limited(
     response: object,
     deadline: float,
     max_bytes: int = MAX_RESPONSE_BYTES,
     reject_overflow: bool = True,
+    sse_protocol: str | None = None,
 ) -> bytes:
     reader = getattr(response, "read1", None)
     if not callable(reader):
         reader = getattr(response, "read")
-    chunks: list[bytes] = []
-    total_bytes = 0
+    body = bytearray()
+    terminal_detector = (
+        _SSETerminalDetector(sse_protocol) if sse_protocol is not None else None
+    )
     while True:
-        if not reject_overflow and total_bytes >= max_bytes:
+        if not reject_overflow and len(body) >= max_bytes:
             break
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -1419,15 +1555,21 @@ def _read_response_limited(
         _set_response_timeout(response, remaining)
         overflow_probe = 1 if reject_overflow else 0
         chunk = reader(
-            min(READ_CHUNK_BYTES, max_bytes + overflow_probe - total_bytes)
+            min(READ_CHUNK_BYTES, max_bytes + overflow_probe - len(body))
         )
         if not chunk:
             break
-        total_bytes += len(chunk)
-        if reject_overflow and total_bytes > max_bytes:
+        body.extend(chunk)
+        terminal_offset = (
+            terminal_detector.feed(body) if terminal_detector is not None else None
+        )
+        if terminal_offset is not None:
+            del body[terminal_offset:]
+        if reject_overflow and len(body) > max_bytes:
             raise ClientError(f"API response exceeds the {max_bytes}-byte limit")
-        chunks.append(chunk)
-    return b"".join(chunks)
+        if terminal_offset is not None:
+            break
+    return bytes(body)
 
 
 def request_review(
@@ -1438,6 +1580,7 @@ def request_review(
     protocol: str = DEFAULT_PROTOCOL,
     *,
     simulated_client: bool = False,
+    return_reasoning: bool = True,
     prepared_headers: dict[str, str] | None = None,
 ) -> str:
     raw_key = os.environ.get(API_KEY_ENV, "") if api_key is None else api_key
@@ -1466,7 +1609,15 @@ def request_review(
         opener = urllib.request.build_opener(NoRedirectHandler)
         with opener.open(request, timeout=timeout) as response:
             content_type = response.headers.get("Content-Type", "")
-            raw = _read_response_limited(response, deadline)
+            expects_sse = (
+                payload.get("stream") is True
+                or "text/event-stream" in content_type.lower()
+            )
+            raw = _read_response_limited(
+                response,
+                deadline,
+                sse_protocol=protocol if expects_sse else None,
+            )
     except urllib.error.HTTPError as exc:
         try:
             raw_error = _read_response_limited(
@@ -1508,9 +1659,21 @@ def request_review(
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise RetryableClientError("API did not return valid UTF-8") from exc
+    if re.match(
+        r"^[\ufeff \t\r\n]*(?:<!doctype\s+html\b|<html\b)",
+        text,
+        re.IGNORECASE,
+    ):
+        raise RetryableClientError("API returned HTML instead of JSON or SSE")
     if "text/event-stream" in content_type.lower() or text.lstrip().startswith(("data:", "event:")):
         try:
-            return sanitize_output(parse_stream_response(text, protocol))
+            return sanitize_output(
+                parse_stream_response(
+                    text,
+                    protocol,
+                    return_reasoning=return_reasoning,
+                )
+            )
         except ClientError as exc:
             raise RetryableClientError(str(exc)) from exc
     try:
@@ -1518,7 +1681,13 @@ def request_review(
     except json.JSONDecodeError as exc:
         raise RetryableClientError("API did not return valid JSON or SSE") from exc
     try:
-        return sanitize_output(parse_response(decoded, protocol))
+        return sanitize_output(
+            parse_response(
+                decoded,
+                protocol,
+                return_reasoning=return_reasoning,
+            )
+        )
     except ClientError as exc:
         raise RetryableClientError(str(exc)) from exc
 
@@ -1533,6 +1702,7 @@ def _request_with_retries(
     protocol: str,
     max_retries: int,
     simulated_client: bool = False,
+    return_reasoning: bool = True,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> str:
     prepared_headers = None
@@ -1552,12 +1722,12 @@ def _request_with_retries(
                 api_key=api_key,
                 protocol=protocol,
                 simulated_client=simulated_client,
+                return_reasoning=return_reasoning,
                 prepared_headers=prepared_headers,
             )
         except (RetryableClientError, TimeoutError, OSError) as exc:
             if retry_index >= max_retries:
-                attempts = retry_index + 1
-                raise ClientError(f"{exc} after {attempts} attempts") from exc
+                raise ClientError(str(exc)) from exc
             sleeper(min(2**retry_index, 8))
     raise AssertionError("retry loop must return or raise")
 
@@ -1597,6 +1767,7 @@ def review_upstreams(
                     protocol=config.protocol,
                     max_retries=config.max_retries,
                     simulated_client=config.simulated_client,
+                    return_reasoning=config.return_reasoning,
                     sleeper=sleeper,
                 )
             )
@@ -1644,6 +1815,7 @@ def build_doctor_report(
                 "api_key_present": bool(config.api_key),
                 "max_retries": config.max_retries,
                 "stream": config.stream,
+                "return_reasoning": config.return_reasoning,
                 "simulated_client": config.simulated_client,
             }
             for config in configs
@@ -1696,6 +1868,7 @@ def _runtime_config(base: Config, args: argparse.Namespace) -> Config:
             ),
             "max_retries": base.max_retries,
             "stream": args.stream if args.stream is not None else base.stream,
+            "return_reasoning": base.return_reasoning,
             "simulated_client": base.simulated_client,
         }
     )
