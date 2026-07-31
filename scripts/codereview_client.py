@@ -1128,7 +1128,7 @@ def _format_review_response(
     text_parts: list[str],
     reasoning_parts: list[str],
     *,
-    return_reasoning: bool = True,
+    return_reasoning: bool = DEFAULT_RETURN_REASONING,
 ) -> str:
     reviews: list[str] = []
     for part in text_parts:
@@ -1243,7 +1243,7 @@ def parse_response(
     response: object,
     protocol: str = DEFAULT_PROTOCOL,
     *,
-    return_reasoning: bool = True,
+    return_reasoning: bool = DEFAULT_RETURN_REASONING,
 ) -> str:
     text_parts, reasoning_parts = _parse_response_parts(response, protocol)
     return _format_review_response(
@@ -1258,7 +1258,7 @@ def parse_stream_response(
     text: str,
     protocol: str,
     *,
-    return_reasoning: bool = True,
+    return_reasoning: bool = DEFAULT_RETURN_REASONING,
 ) -> str:
     deltas: list[str] = []
     reasoning_deltas: list[str] = []
@@ -1539,9 +1539,11 @@ def _read_response_limited(
     reject_overflow: bool = True,
     sse_protocol: str | None = None,
 ) -> bytes:
+    # `read1` is optional; keep dynamic lookup for the capability probe.
     reader = getattr(response, "read1", None)
     if not callable(reader):
-        reader = getattr(response, "read")
+        # The fallback attribute is fixed, so direct access satisfies Ruff B009.
+        reader = response.read
     body = bytearray()
     terminal_detector = (
         _SSETerminalDetector(sse_protocol) if sse_protocol is not None else None
@@ -1580,7 +1582,7 @@ def request_review(
     protocol: str = DEFAULT_PROTOCOL,
     *,
     simulated_client: bool = False,
-    return_reasoning: bool = True,
+    return_reasoning: bool = DEFAULT_RETURN_REASONING,
     prepared_headers: dict[str, str] | None = None,
 ) -> str:
     raw_key = os.environ.get(API_KEY_ENV, "") if api_key is None else api_key
@@ -1702,7 +1704,7 @@ def _request_with_retries(
     protocol: str,
     max_retries: int,
     simulated_client: bool = False,
-    return_reasoning: bool = True,
+    return_reasoning: bool = DEFAULT_RETURN_REASONING,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> str:
     prepared_headers = None
