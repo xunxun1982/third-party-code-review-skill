@@ -91,6 +91,8 @@ SSE_TERMINAL_EVENT_TYPES = {
 SSE_JSON_TYPE_PREFIX_RE = re.compile(
     rb'^\s*\{\s*"type"\s*:\s*"(?P<type>[A-Za-z0-9._-]+)"(?=\s*[,}])'
 )
+SSE_JSON_WHITESPACE_RE = re.compile(rb"[ \t\r\n]*")
+SSE_LINE_END_RE = re.compile(r"\r\n|[\r\n]")
 UPSTREAM_SECTION_RE = re.compile(r"^upstream(?:[0-9]+|_[a-z0-9_-]+)$", re.IGNORECASE)
 
 API_KEY_ENV = "THIRD_PARTY_CODEREVIEW_API_KEY"
@@ -1254,6 +1256,58 @@ def parse_response(
     )
 
 
+def _iter_sse_data_events(text: str) -> Iterable[str]:
+    data_lines: list[str] = []
+    start = 0
+    text_length = len(text)
+    while start <= text_length:
+        boundary = SSE_LINE_END_RE.search(text, start)
+        if boundary is None:
+            if start == text_length:
+                break
+            line = text[start:]
+            start = text_length + 1
+        else:
+            line = text[start : boundary.start()]
+            start = boundary.end()
+
+        if not line:
+            if data_lines:
+                event_data = "\n".join(data_lines)
+                data_lines.clear()
+                yield event_data
+            continue
+        if line.startswith(":"):
+            continue
+        field, separator, value = line.partition(":")
+        if field != "data":
+            continue
+        if separator and value.startswith(" "):
+            value = value[1:]
+        data_lines.append(value)
+
+    # Preserve the previous parser's tolerance for a final event without a blank line.
+    if data_lines:
+        yield "\n".join(data_lines)
+
+
+def _parse_stream_fallback_parts(
+    event: dict[str, Any], protocol: str
+) -> tuple[list[str], list[str]] | None:
+    candidates = [event]
+    nested_response = event.get("response")
+    if isinstance(nested_response, dict):
+        candidates.insert(0, nested_response)
+    for candidate in candidates:
+        try:
+            text_parts, reasoning_parts = _parse_response_parts(candidate, protocol)
+        except ClientError:
+            continue
+        if text_parts or reasoning_parts:
+            return text_parts, reasoning_parts
+    return None
+
+
 def parse_stream_response(
     text: str,
     protocol: str,
@@ -1263,12 +1317,10 @@ def parse_stream_response(
     deltas: list[str] = []
     reasoning_deltas: list[str] = []
     completed_reasoning: list[str] = []
-    fallback_objects: list[dict[str, Any]] = []
+    fallback_parts: tuple[list[str], list[str]] | None = None
 
-    for line in text.splitlines():
-        if not line.startswith("data:"):
-            continue
-        raw_data = line[5:].strip()
+    for raw_data in _iter_sse_data_events(text):
+        raw_data = raw_data.strip()
         if not raw_data or raw_data == "[DONE]":
             continue
         try:
@@ -1349,25 +1401,11 @@ def parse_stream_response(
                     completed_reasoning = terminal_reasoning
 
         if deltas:
-            fallback_objects.clear()
-        elif reasoning_deltas:
-            candidates = [event]
-            nested_response = event.get("response")
-            if isinstance(nested_response, dict):
-                candidates.insert(0, nested_response)
-            for candidate in candidates:
-                try:
-                    text_parts, candidate_reasoning = _parse_response_parts(
-                        candidate, protocol
-                    )
-                except ClientError:
-                    continue
-                if not text_parts and not candidate_reasoning:
-                    continue
-                fallback_objects[:] = [event]
-                break
+            fallback_parts = None
         else:
-            fallback_objects.append(event)
+            candidate_parts = _parse_stream_fallback_parts(event, protocol)
+            if candidate_parts is not None:
+                fallback_parts = candidate_parts
 
     if deltas:
         return _format_review_response(
@@ -1377,24 +1415,14 @@ def parse_stream_response(
             return_reasoning=return_reasoning,
         )
 
-    for event in reversed(fallback_objects):
-        candidates = [event]
-        nested_response = event.get("response")
-        if isinstance(nested_response, dict):
-            candidates.insert(0, nested_response)
-        for candidate in candidates:
-            try:
-                text_parts, final_reasoning = _parse_response_parts(
-                    candidate, protocol
-                )
-                return _format_review_response(
-                    protocol,
-                    text_parts,
-                    final_reasoning or ["".join(reasoning_deltas)],
-                    return_reasoning=return_reasoning,
-                )
-            except ClientError:
-                continue
+    if fallback_parts is not None:
+        text_parts, final_reasoning = fallback_parts
+        return _format_review_response(
+            protocol,
+            text_parts,
+            final_reasoning or ["".join(reasoning_deltas)],
+            return_reasoning=return_reasoning,
+        )
     if reasoning_deltas:
         return _format_review_response(
             protocol,
@@ -1450,12 +1478,14 @@ class _SSETerminalDetector:
         self._data = bytearray()
         self._has_data_line = False
         self._data_too_large = False
+        self._discarded_data_is_whitespace = True
 
     def _reset_event(self) -> None:
         self._event_name = b""
         self._data.clear()
         self._has_data_line = False
         self._data_too_large = False
+        self._discarded_data_is_whitespace = True
 
     def _append_data(self, body: bytearray, start: int, end: int) -> None:
         if self._has_data_line and len(self._data) < SSE_TERMINAL_DATA_BYTES:
@@ -1467,6 +1497,10 @@ class _SSETerminalDetector:
             self._data.extend(memoryview(body)[start : start + copied])
         if copied < end - start:
             self._data_too_large = True
+            if self._discarded_data_is_whitespace:
+                discarded = memoryview(body)[start + copied : end]
+                if not SSE_JSON_WHITESPACE_RE.fullmatch(discarded):
+                    self._discarded_data_is_whitespace = False
 
     def _data_is_terminal(self) -> bool:
         data = bytes(self._data)
@@ -1478,8 +1512,15 @@ class _SSETerminalDetector:
         if terminal_type is None or terminal_type not in data:
             return False
         if self._data_too_large:
+            # Named SSE events are authoritative. This bounded data-only fallback
+            # avoids full-event copies; duplicate JSON members remain ambiguous.
             match = SSE_JSON_TYPE_PREFIX_RE.match(data)
-            return bool(match and match.group("type") == terminal_type)
+            if match and match.group("type") == terminal_type:
+                return True
+            if not self._discarded_data_is_whitespace:
+                return False
+            # Dropped JSON whitespace can leave the retained prefix independently
+            # parseable.
         try:
             event = json.loads(data)
         except (UnicodeDecodeError, json.JSONDecodeError):
