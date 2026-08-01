@@ -153,7 +153,7 @@ Visible reasoning is parsed without adding request parameters. `openai_chat` acc
 
 When reasoning exists and `RETURN_REASONING = true`, output places `{Upstream reasoning or summary (<protocol>): ...}` before `Review result`. Without returned reasoning, output remains the plain review text. Reasoning-only output is valid and marks the body `[No review text returned]`; only a response containing neither reasoning nor review text is empty and retryable.
 
-Each upstream may make up to `1 + MAX_RETRIES` stateless attempts. Retryable failures are transport errors, timeouts, HTTP 408/429/5xx, invalid UTF-8, invalid JSON/SSE, and responses with no usable text. Redirects, other 4xx responses, configuration errors, and local input errors fail immediately. Retry waits are 1, 2, and 4 seconds, then remain capped at 8 seconds. With two upstreams at the default, the maximum is eight external attempts in total, but the counters and completion timing remain independent.
+Each upstream may make up to `1 + MAX_RETRIES` stateless attempts. Retryable failures are transport errors, timeouts, HTTP 408/429/5xx, invalid UTF-8, API responses containing HTML instead of the expected JSON or SSE format, invalid JSON/SSE, and responses with no usable text. Redirects, other 4xx responses, configuration errors, and local input errors fail immediately. Retry waits are 1, 2, and 4 seconds, then remain capped at 8 seconds. With two upstreams at the default, the maximum is eight external attempts in total, but the counters and completion timing remain independent.
 
 Requests use `User-Agent: third-party-code-review-skill/1.0` unless a supported upstream explicitly enables the profile above.
 

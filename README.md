@@ -355,7 +355,7 @@ Trusted configured endpoints may use plain HTTP, including internal relays and d
 
 OpenAI Responses requests include `store: false`. Storage and training policies of custom proxies remain server-side concerns and must be verified with the service operator.
 
-Redirects are refused so API credentials remain on the exact configured endpoint. `TIMEOUT_SECONDS` is enforced separately for every attempt as a monotonic total response deadline, and response capture accepts at most `10000000` bytes. A complete protocol terminal SSE event ends capture without waiting for the server to close the HTTP connection. Transport failures, timeouts, HTTP 408/429/5xx, invalid UTF-8, invalid JSON/SSE, and responses with no usable text are retryable. Redirects, other 4xx responses, configuration errors, and local input errors are not retried.
+Redirects are refused so API credentials remain on the exact configured endpoint. `TIMEOUT_SECONDS` is enforced separately for every attempt as a monotonic total response deadline, and response capture accepts at most `10000000` bytes. A complete protocol terminal SSE event ends capture without waiting for the server to close the HTTP connection. Transport failures, timeouts, HTTP 408/429/5xx, invalid UTF-8, API responses containing HTML instead of the expected JSON or SSE format, invalid JSON/SSE, and responses with no usable text are retryable. Redirects, other 4xx responses, configuration errors, and local input errors are not retried.
 
 ### Untrusted response
 
